@@ -1,0 +1,4 @@
+PyQt6==6.11.0
+psutil>=7.0
+PyQt6-Frameless-Window>=0.8.0
+darkdetect>=0.8.0

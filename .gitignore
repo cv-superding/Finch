@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.testhome*/
+.smokehome/
+.uihome/
+.extrastates/
+.smoke*.png
+.cap*.log
+.test.log
+docs/screenshots/crop-*.png
+.realoc/
+.designhome/
+.uitest/
+.finaltest/

@@ -14,3 +14,6 @@ docs/screenshots/crop-*.png
 .designhome/
 .uitest/
 .finaltest/
+
+# 本地设计参考图（第三方产品截图，不随仓库分发）
+docs/references/

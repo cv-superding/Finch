@@ -60,7 +60,10 @@ class HistoryRail(QFrame):
         summary = QHBoxLayout()
         summary.setSpacing(8)
         self.big = QLabel("0")
-        self.big.setStyleSheet(f"font-size: 24px; font-weight: 600; color: {theme.TEXT};")
+        self.big.setStyleSheet(
+            f"font-size: 28px; font-weight: 600; color: {theme.TEXT};"
+            f" font-family: '{theme.mono_family()}';"
+        )
         summary.addWidget(self.big)
         self.big_caption = QLabel("份执行存档")
         self.big_caption.setStyleSheet(f"color: {theme.MUTED}; font-size: 13px;")
@@ -96,7 +99,10 @@ class HistoryRail(QFrame):
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(1)
             value = QLabel("0")
-            value.setStyleSheet(f"font-size: 17px; font-weight: 600; color: {theme.TEXT};")
+            value.setStyleSheet(
+                f"font-size: 17px; font-weight: 600; color: {theme.TEXT};"
+                f" font-family: '{theme.mono_family()}';"
+            )
             layout.addWidget(value)
             caption = QLabel(label_text)
             caption.setStyleSheet(f"color: {theme.MUTED}; font-size: 12px;")
@@ -149,7 +155,9 @@ class HistoryRail(QFrame):
         self.values["done"].setText(str(done))
         self.values["attention"].setText(str(attention))
         self.values["attention"].setStyleSheet(
-            f"font-size: 17px; font-weight: 600; color: {theme.RED_TINT if attention else theme.SUBTLE};"
+            f"font-size: 17px; font-weight: 600;"
+            f" color: {theme.RED_TINT if attention else theme.SUBTLE};"
+            f" font-family: '{theme.mono_family()}';"
         )
         self.values["runs"].setText(str(runs))
         self.values["tools"].setText(str(tools))

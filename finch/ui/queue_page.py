@@ -2,13 +2,27 @@ from __future__ import annotations
 
 import os
 
-from PyQt6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QPoint,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    QVariantAnimation,
+    pyqtSignal,
+)
 from PyQt6.QtGui import QColor, QIcon, QPainter
 from PyQt6.QtWidgets import (
     QDialog,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QProgressBar,
+    QPushButton,
     QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
@@ -36,10 +50,10 @@ from .autopilot_dialog import AutopilotDialog
 from .board import COLUMN_DEFS, KanbanBoard
 from .detail_panel import TaskDetailPanel
 from .editor_dialog import OptimizeDialog, TaskEditorDialog
-from .glyphs import line_icon
+from .glyphs import line_icon, transport_icon, transport_icon
 from .overview_panel import OverviewPanel
-from .task_row import AddTaskRow, TaskRow
-from .widgets import ConfirmDialog, Select, pick_folder
+from .task_row import DRAG_MIME, AddTaskRow, TaskRow
+from .widgets import ConfirmDialog, EdgeResizeHandle, Select, pick_folder
 
 RUNNING = {
     TaskStatus.running.value,
@@ -69,8 +83,24 @@ class QueueGlyph(QWidget):
             painter.drawRoundedRect(QRectF(x, w * 0.24, w * 0.15, w * height), w * 0.05, w * 0.05)
 
 
+class InspectorFrame(QFrame):
+    """Right panel with a draggable left edge."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.handle = EdgeResizeHandle("left", 260, 460, self)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.handle.setGeometry(0, 0, 4, self.height())
+        self.handle.raise_()
+
+
 class QueueList(QWidget):
     reorder_requested = pyqtSignal(str, int)
+    complete_toggled = pyqtSignal(str)
+    quick_add_requested = pyqtSignal(str)
+    pause_requested = pyqtSignal()
     selected = pyqtSignal(str)
     optimize_requested = pyqtSignal(str)
     edit_requested = pyqtSignal(str)
@@ -79,6 +109,7 @@ class QueueList(QWidget):
     run_requested = pyqtSignal(str, str)
     empty_new_requested = pyqtSignal()
     empty_demo_requested = pyqtSignal()
+    clear_filter_requested = pyqtSignal()
     add_requested = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -87,7 +118,7 @@ class QueueList(QWidget):
         self.setObjectName("QueueList")
         self.setStyleSheet("QWidget#QueueList { background: transparent; }")
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(8, 4, 8, 8)
+        self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)
         self._layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.rows: dict[str, TaskRow] = {}
@@ -96,12 +127,26 @@ class QueueList(QWidget):
         self._drag_y = -1
         self._drag_active = False
         self._initialized = False
+        self._filtered = False
+        self._indicator = QFrame(self)
+        self._indicator.setObjectName("DropIndicator")
+        self._indicator.setStyleSheet(
+            f"QFrame#DropIndicator {{ background: {theme.ACCENT}; border: none; }}"
+        )
+        self._indicator.setFixedHeight(2)
+        self._indicator.hide()
 
-    def set_tasks(self, tasks, runs_map, default_agent, selected_id):
+    def set_tasks(self, tasks, runs_map, default_agent, selected_id, filtered: bool = False):
         ids = [task.id for task in tasks]
         missing = any(task.id not in self.rows for task in tasks)
-        if not self._initialized or ids != self._order or missing:
-            self._rebuild(tasks, runs_map, default_agent, selected_id)
+        if (
+            not self._initialized
+            or ids != self._order
+            or missing
+            or filtered != self._filtered
+        ):
+            self._filtered = filtered
+            self._rebuild(tasks, runs_map, default_agent, selected_id, filtered)
             self._initialized = True
         else:
             for task in tasks:
@@ -110,16 +155,18 @@ class QueueList(QWidget):
                     row.update_data(task, runs_map.get(task.id, []), default_agent, task.id == selected_id)
         self._selected_id = selected_id
 
-    def _rebuild(self, tasks, runs_map, default_agent, selected_id):
+    def _rebuild(self, tasks, runs_map, default_agent, selected_id, filtered: bool = False):
         while self._layout.count():
             item = self._layout.takeAt(0)
             widget = item.widget()
             if widget:
+                # 先脱离父级，避免旧行在 deleteLater 生效前继续绘制
+                widget.setParent(None)
                 widget.deleteLater()
         self.rows.clear()
         self._order = [task.id for task in tasks]
         if not tasks:
-            self._layout.addWidget(self._empty_state())
+            self._layout.addWidget(self._empty_state(filtered))
             return
         for index, task in enumerate(tasks):
             row = TaskRow(task, runs_map.get(task.id, []), default_agent, index=index + 1, first=index == 0)
@@ -129,28 +176,59 @@ class QueueList(QWidget):
             row.retry_requested.connect(self.retry_requested.emit)
             row.delete_requested.connect(self.delete_requested.emit)
             row.run_requested.connect(self.run_requested.emit)
+            row.complete_toggled.connect(self.complete_toggled.emit)
+            row.pause_requested.connect(self.pause_requested.emit)
             row.set_selected(task.id == selected_id)
             self._layout.addWidget(row)
             self.rows[task.id] = row
         add = AddTaskRow()
         add.clicked.connect(self.add_requested.emit)
+        add.quick_add_requested.connect(self.quick_add_requested.emit)
         self._layout.addWidget(add)
 
-    def _empty_state(self) -> QWidget:
+    def _empty_state(self, filtered: bool = False) -> QWidget:
         host = QWidget()
         layout = QVBoxLayout(host)
         layout.setContentsMargins(16, 40, 16, 40)
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(QueueGlyph(40), 0, Qt.AlignmentFlag.AlignHCenter)
-        layout.addSpacing(4)
+        layout.addSpacing(8)
+
+        if filtered:
+            title = QLabel("没有匹配的任务")
+            title.setStyleSheet(
+                f"font-size: 15px; font-weight: 600; color: {theme.TEXT};"
+            )
+            title.setMinimumHeight(24)
+            layout.addWidget(title, 0, Qt.AlignmentFlag.AlignHCenter)
+            text = QLabel("当前 Agent 或搜索条件下没有任务，清除筛选即可看到完整队列。")
+            text.setWordWrap(True)
+            text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            text.setFixedWidth(440)
+            text.setMinimumHeight(40)
+            text.setStyleSheet(f"color: {theme.MUTED}; font-size: 12px;")
+            layout.addWidget(text, 0, Qt.AlignmentFlag.AlignHCenter)
+            buttons = QHBoxLayout()
+            buttons.setSpacing(8)
+            clear = PrimaryPushButton("清除筛选")
+            clear.clicked.connect(self.clear_filter_requested.emit)
+            buttons.addStretch(1)
+            buttons.addWidget(clear)
+            buttons.addStretch(1)
+            layout.addLayout(buttons)
+            return host
+
         title = QLabel("建立第一条任务")
-        title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        title.setStyleSheet(
+                f"font-size: 15px; font-weight: 600; color: {theme.TEXT};"
+            )
+        title.setMinimumHeight(24)
         layout.addWidget(title, 0, Qt.AlignmentFlag.AlignHCenter)
         text = QLabel("把主提示词排进队列，Finch 会监听中断、自动续传，并在完成后验收与补做。")
         text.setWordWrap(True)
         text.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        text.setFixedWidth(380)
+        text.setFixedWidth(440)
         text.setMinimumHeight(40)
         text.setStyleSheet(f"color: {theme.MUTED}; font-size: 12px;")
         layout.addWidget(text, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -193,13 +271,13 @@ class QueueList(QWidget):
             event.ignore()
             return
         self._drag_y = int(event.position().y())
-        self.update()
+        self._show_indicator(self._drag_y)
         event.acceptProposedAction()
 
     def dragLeaveEvent(self, event) -> None:
         self._drag_active = False
         self._drag_y = -1
-        self.update()
+        self._indicator.hide()
 
     def dropEvent(self, event) -> None:
         if not event.mimeData().hasFormat(DRAG_MIME):
@@ -209,7 +287,7 @@ class QueueList(QWidget):
         index = self._index_at(int(event.position().y()))
         self._drag_active = False
         self._drag_y = -1
-        self.update()
+        self._indicator.hide()
         self.reorder_requested.emit(task_id, index)
         event.acceptProposedAction()
 
@@ -221,20 +299,30 @@ class QueueList(QWidget):
                 return index
         return len(rows)
 
+    def _indicator_y(self, y: int) -> int:
+        rows = [self.rows[tid] for tid in self._order if tid in self.rows]
+        for row in rows:
+            if y < row.geometry().center().y():
+                return row.geometry().top()
+        if rows:
+            return rows[-1].geometry().bottom() - 8
+        return 0
+
+    def _show_indicator(self, y: int) -> None:
+        pos = self._indicator_y(y)
+        self._indicator.setGeometry(
+            18, max(0, pos - 1), max(0, self.width() - 36), 2
+        )
+        self._indicator.show()
+        self._indicator.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._indicator.isVisible() and self._drag_y >= 0:
+            self._show_indicator(self._drag_y)
+
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
-        if not self._drag_active or self._drag_y < 0:
-            return
-        rows = [self.rows[tid] for tid in self._order if tid in self.rows]
-        y = self.height() - 20
-        for row in rows:
-            if self._drag_y < row.geometry().center().y():
-                y = row.geometry().top()
-                break
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QColor(theme.ACCENT))
-        painter.drawLine(18, y, self.width() - 18, y)
 
 
 class QueuePage(QWidget):
@@ -259,91 +347,124 @@ class QueuePage(QWidget):
 
         header_wrap = QWidget()
         header = QHBoxLayout(header_wrap)
-        header.setContentsMargins(32, 22, 32, 12)
-        header.setSpacing(12)
-        header.addWidget(QueueGlyph(40))
-        left = QVBoxLayout()
-        left.setSpacing(3)
+        header.setContentsMargins(24, 18, 24, 4)
+        header.setSpacing(8)
+
         title = QLabel("任务队列")
         title.setObjectName("PageTitle")
-        left.addWidget(title)
-        subtitle = QLabel("按顺序下发提示词，区分工具执行与真实中断，自动续传、验收与补做。")
-        subtitle.setObjectName("PageSubtitle")
-        left.addWidget(subtitle)
-        header.addLayout(left, 1)
-        self.autopilot_btn = PushButton("自动驾驶")
-        self.autopilot_btn.setIcon(line_icon("bot", theme.TEXT_SOFT, 16))
-        self.autopilot_btn.setIconSize(QSize(16, 16))
+        header.addWidget(title)
+
+        self.header_more = TransparentToolButton()
+        self.header_more.setIcon(line_icon("more", theme.MUTED, 16))
+        self.header_more.setIconSize(QSize(16, 16))
+        self.header_more.setFixedSize(28, 28)
+        self.header_more.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.header_more.setToolTip("更多操作")
+        self.header_more.clicked.connect(self._open_header_menu)
+        header.addWidget(self.header_more)
+
+        header.addStretch(1)
+
+        self.autopilot_btn = TransparentToolButton()
+        self.autopilot_btn.setIcon(line_icon("bot", theme.MUTED, 17))
+        self.autopilot_btn.setIconSize(QSize(17, 17))
+        self.autopilot_btn.setFixedSize(30, 30)
         self.autopilot_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.autopilot_btn.setToolTip("自动驾驶")
         self.autopilot_btn.clicked.connect(self._open_autopilot)
         header.addWidget(self.autopilot_btn)
-        self.run_btn = PrimaryPushButton("开始队列")
-        self.run_btn.setIcon(line_icon("play-solid"))
+
+        self.new_btn = QPushButton("新建任务")
+        self.new_btn.setObjectName("GhostButton")
+        self.new_btn.setFixedHeight(30)
+        self.new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.new_btn.clicked.connect(self._new_task)
+        header.addWidget(self.new_btn)
+
+        self.run_btn = QPushButton()
+        self.run_btn.setObjectName("RunCircle")
+        self.run_btn.setFixedSize(40, 40)
+        self.run_btn.setIcon(transport_icon("play", "#FFFFFF", 16))
         self.run_btn.setIconSize(QSize(16, 16))
         self.run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.run_btn.setToolTip("开始队列")
         self.run_btn.clicked.connect(self._toggle_run)
+        self.run_btn.installEventFilter(self)
+        self._run_anim_value = 0.0
+        self._run_glow = QGraphicsDropShadowEffect(self.run_btn)
+        self._run_glow.setColor(QColor(theme.ACCENT))
+        self._run_glow.setBlurRadius(20)
+        self._run_glow.setOffset(0, 0)
+        self._run_glow.setEnabled(False)
+        self.run_btn.setGraphicsEffect(self._run_glow)
+        self._run_anim = None
         header.addWidget(self.run_btn)
+
         root.addWidget(header_wrap)
 
         toolbar_wrap = QWidget()
         toolbar = QHBoxLayout(toolbar_wrap)
-        toolbar.setContentsMargins(32, 0, 32, 10)
-        toolbar.setSpacing(6)
-        self.view_tabs = SegmentedWidget()
-        self.view_tabs.addItem("board", "看板", lambda: self._set_view(0))
-        self.view_tabs.addItem("list", "清单", lambda: self._set_view(1))
-        self.view_tabs.setCurrentItem("board")
-        toolbar.addWidget(self.view_tabs)
-        toolbar.addStretch(1)
-        self.filter_chip = PushButton("")
-        self.filter_chip.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.filter_chip.setToolTip("清除 Agent 过滤")
-        self.filter_chip.clicked.connect(lambda: self.set_agent_filter(""))
-        self.filter_chip.hide()
-        toolbar.addWidget(self.filter_chip)
+        toolbar.setContentsMargins(24, 0, 24, 10)
+        toolbar.setSpacing(8)
+
         self.search_edit = SearchLineEdit()
-        self.search_edit.setPlaceholderText("搜索任务…")
-        self.search_edit.setFixedWidth(180)
+        self.search_edit.setPlaceholderText("搜索任务")
+        self.search_edit.setFixedWidth(240)
+        self.search_edit.setFixedHeight(30)
         self.search_edit.textChanged.connect(self._on_search)
         toolbar.addWidget(self.search_edit)
+
         self.agent_select = Select(options=[], value=config.agent, icons=self._agent_icon)
         self.agent_select.setMinimumWidth(120)
         self.agent_select.setMaximumWidth(160)
         self.agent_select.changed.connect(self._on_agent_changed)
         toolbar.addWidget(self.agent_select)
-        self.cwd_chip = PushButton("")
+
+        self.view_tabs = SegmentedWidget()
+        self.view_tabs.addItem("board", "看板", lambda: self._set_view(0))
+        self.view_tabs.addItem("list", "清单", lambda: self._set_view(1))
+        self.view_tabs.setCurrentItem("list")
+        toolbar.addWidget(self.view_tabs)
+
+        toolbar.addStretch(1)
+
+        self.filter_chip = QPushButton("")
+        self.filter_chip.setObjectName("GhostButton")
+        self.filter_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.filter_chip.setToolTip("清除 Agent 过滤")
+        self.filter_chip.clicked.connect(lambda: self.set_agent_filter(""))
+        self.filter_chip.hide()
+        toolbar.addWidget(self.filter_chip)
+
+        self.cwd_chip = QPushButton("")
+        self.cwd_chip.setObjectName("GhostButton")
         self.cwd_chip.setIcon(line_icon("folder", theme.SUBTLE, 14))
         self.cwd_chip.setIconSize(QSize(14, 14))
         self.cwd_chip.setMaximumWidth(140)
         self.cwd_chip.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cwd_chip.clicked.connect(self._choose_cwd)
         toolbar.addWidget(self.cwd_chip)
-        self.new_btn = PushButton("新建")
-        self.new_btn.setIcon(line_icon("plus", theme.TEXT_SOFT, 14))
-        self.new_btn.setIconSize(QSize(14, 14))
-        self.new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.new_btn.clicked.connect(self._new_task)
-        toolbar.addWidget(self.new_btn)
+
         self.layout_btn = TransparentToolButton()
-        self.layout_btn.setIcon(line_icon("layers", theme.TEXT_SOFT, 16))
+        self.layout_btn.setIcon(line_icon("layers", theme.MUTED, 16))
         self.layout_btn.setIconSize(QSize(16, 16))
-        self.layout_btn.setFixedSize(30, 30)
+        self.layout_btn.setFixedSize(28, 28)
         self.layout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.layout_btn.setToolTip("横向 / 纵向切换看板排列")
         self.layout_btn.clicked.connect(self._toggle_layout)
         toolbar.addWidget(self.layout_btn)
         self.columns_btn = TransparentToolButton()
-        self.columns_btn.setIcon(line_icon("sliders", theme.TEXT_SOFT, 16))
+        self.columns_btn.setIcon(line_icon("sliders", theme.MUTED, 16))
         self.columns_btn.setIconSize(QSize(16, 16))
-        self.columns_btn.setFixedSize(30, 30)
+        self.columns_btn.setFixedSize(28, 28)
         self.columns_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.columns_btn.setToolTip("列设置：显示已隐藏的列")
         self.columns_btn.clicked.connect(self._open_columns_menu)
         toolbar.addWidget(self.columns_btn)
         self.inspector_btn = TransparentToolButton()
-        self.inspector_btn.setIcon(line_icon("view", theme.TEXT_SOFT, 16))
+        self.inspector_btn.setIcon(line_icon("view", theme.MUTED, 16))
         self.inspector_btn.setIconSize(QSize(16, 16))
-        self.inspector_btn.setFixedSize(30, 30)
+        self.inspector_btn.setFixedSize(28, 28)
         self.inspector_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.inspector_btn.setToolTip("显示 / 隐藏右侧概览面板")
         self.inspector_btn.clicked.connect(self._toggle_inspector)
@@ -352,7 +473,7 @@ class QueuePage(QWidget):
 
         content_wrap = QWidget()
         content_layout = QHBoxLayout(content_wrap)
-        content_layout.setContentsMargins(32, 0, 0, 0)
+        content_layout.setContentsMargins(32, 0, 32, 0)
         content_layout.setSpacing(0)
 
         self.view_stack = QStackedWidget()
@@ -382,7 +503,11 @@ class QueuePage(QWidget):
         self.queue_list.edit_requested.connect(self._edit_task)
         self.queue_list.retry_requested.connect(self._retry_task)
         self.queue_list.delete_requested.connect(self._delete_task)
-        self.queue_list.run_requested.connect(self._select_run)
+        self.queue_list.run_requested.connect(self._on_run_requested)
+        self.queue_list.complete_toggled.connect(self._toggle_complete)
+        self.queue_list.quick_add_requested.connect(self._quick_add)
+        self.queue_list.clear_filter_requested.connect(self._clear_filters)
+        self.queue_list.pause_requested.connect(self._toggle_run)
         self.queue_list.empty_new_requested.connect(self._new_task)
         self.queue_list.empty_demo_requested.connect(self._load_demo)
         self.queue_list.add_requested.connect(self._new_task)
@@ -390,6 +515,7 @@ class QueuePage(QWidget):
         self.scroll.setWidget(self.queue_list)
         self.scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.view_stack.addWidget(self.scroll)
+        self.view_stack.setCurrentIndex(1)
         content_layout.addWidget(self.view_stack, 1)
 
         self.detail = TaskDetailPanel(self, store, engine)
@@ -400,10 +526,14 @@ class QueuePage(QWidget):
         self.rail_stack.setMinimumWidth(0)
         self.rail_stack.addWidget(self.overview)
         self.rail_stack.addWidget(self.detail)
-        self.inspector = QFrame()
+        self.inspector = InspectorFrame()
         self.inspector.setMinimumWidth(0)
+        self.inspector.setMaximumWidth(320)
         self.inspector.setObjectName("Inspector")
-        self.inspector.setFixedWidth(300)
+        self._inspector_anim = None
+        self.inspector.handle.resized.connect(self._on_inspector_drag)
+        self.inspector.handle.finished.connect(self._save_inspector_width)
+        self.inspector.handle.toggled.connect(self._toggle_inspector)
         inspector_layout = QVBoxLayout(self.inspector)
         inspector_layout.setContentsMargins(0, 0, 0, 0)
         inspector_layout.setSpacing(0)
@@ -415,27 +545,44 @@ class QueuePage(QWidget):
         bottom = QFrame()
         bottom.setObjectName("BottomBar")
         bottom_layout = QHBoxLayout(bottom)
-        bottom_layout.setContentsMargins(32, 7, 32, 7)
-        bottom_layout.setSpacing(8)
+        bottom_layout.setContentsMargins(24, 6, 24, 6)
+        bottom_layout.setSpacing(10)
+
         self.state_dot = QLabel("•")
         self.state_dot.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 12px;")
         bottom_layout.addWidget(self.state_dot)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setObjectName("StatusProgress")
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFixedSize(120, 3)
+        self.progress_bar.setTextVisible(False)
+        bottom_layout.addWidget(self.progress_bar)
+
+        self.progress_label = QLabel("0/0 已完成")
+        self.progress_label.setStyleSheet(
+            f"color: {theme.TEXT}; font-family: {theme.mono_family()}; font-size: 11.5px;"
+        )
+        bottom_layout.addWidget(self.progress_label)
+
         self.stats_label = QLabel("")
-        self.stats_label.setStyleSheet(f"color: {theme.MUTED}; font-size: 12px;")
+        self.stats_label.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 11.5px;")
         bottom_layout.addWidget(self.stats_label)
+
         bottom_layout.addStretch(1)
-        self.stop_btn = PushButton("终止")
-        self.stop_btn.setFixedHeight(26)
-        self.stop_btn.clicked.connect(self._stop_queue)
-        self.skip_btn = PushButton("跳过续传/补做")
-        self.skip_btn.setFixedHeight(26)
-        self.skip_btn.clicked.connect(self._skip_retry)
-        self.next_btn = PushButton("下一条")
-        self.next_btn.setFixedHeight(26)
-        self.next_btn.clicked.connect(self._force_next)
+
+        self.stop_btn = QPushButton("终止")
+        self.skip_btn = QPushButton("跳过续传/补做")
+        self.next_btn = QPushButton("下一条")
         for button in (self.stop_btn, self.skip_btn, self.next_btn):
+            button.setObjectName("GhostButton")
+            button.setFixedHeight(26)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             bottom_layout.addWidget(button)
+        self.stop_btn.clicked.connect(self._stop_queue)
+        self.skip_btn.clicked.connect(self._skip_retry)
+        self.next_btn.clicked.connect(self._force_next)
         root.addWidget(bottom)
 
         self._latest_activity = ""
@@ -468,6 +615,11 @@ class QueuePage(QWidget):
         route = "board" if index == 0 else "list"
         if self.view_tabs.currentItem() != route:
             self.view_tabs.setCurrentItem(route)
+        # 看板本身需要整幅宽度，概览面板在看板下会挤扁四列
+        if index == 0:
+            self._animate_inspector(0)
+        elif not self.config.inspector_collapsed:
+            self._animate_inspector(self._inspector_target())
 
     def _agent_icon(self, key: str) -> QIcon | None:
         return agent_qicon(key)
@@ -504,7 +656,10 @@ class QueuePage(QWidget):
         self._display_ids = [task.id for task in display]
         self.board.set_tasks(display, runs_map, self.config.agent, self.selected_id)
         self.board.set_selected(self.selected_id)
-        self.queue_list.set_tasks(display, runs_map, self.config.agent, self.selected_id)
+        filtered = bool(self.agent_filter or self._search)
+        self.queue_list.set_tasks(
+            display, runs_map, self.config.agent, self.selected_id, filtered=filtered
+        )
         self.queue_list.set_selected(self.selected_id)
         self.agent_select.set_value(self.config.agent)
         self._update_toolbar(tasks)
@@ -549,30 +704,41 @@ class QueuePage(QWidget):
         if tool_total:
             parts.append(f"{tool_total} 次工具")
         self.stats_label.setText(" · ".join(parts))
+        total = len(tasks)
+        self.progress_label.setText(f"{done}/{total} 已完成")
+        self.progress_bar.setValue(int(done * 100 / total) if total else 0)
 
     def _update_autopilot_btn(self) -> None:
         if self.engine.autopilot_active:
             state = self.engine.autopilot_state()
-            self.autopilot_btn.setText(f"自动 {state['rounds_used']}/{state['max_rounds']}")
+            self.autopilot_btn.setToolTip(
+                f"自动驾驶 {state['rounds_used']}/{state['max_rounds']} 轮"
+            )
         elif self.engine.autopilot_resumable:
-            self.autopilot_btn.setText("继续自动")
+            self.autopilot_btn.setToolTip("继续自动驾驶")
         else:
-            self.autopilot_btn.setText("自动驾驶")
+            self.autopilot_btn.setToolTip("自动驾驶")
 
     def _update_controls(self, tasks: list[Task] | None = None) -> None:
         state = self.engine.state
         if state == "running":
-            self.run_btn.setText("暂停队列")
-            self.run_btn.setIcon(line_icon("pause", theme.CARD, 16))
+            self.run_btn.setIcon(transport_icon("pause", "#FFFFFF", 18))
+            self.run_btn.setToolTip("暂停队列")
+            self.run_btn.setProperty("paused", False)
         elif state == "paused":
-            self.run_btn.setText("继续队列")
-            self.run_btn.setIcon(line_icon("play-solid", theme.CARD, 16))
+            self.run_btn.setIcon(transport_icon("play", theme.ACCENT, 16))
+            self.run_btn.setToolTip("继续队列")
+            self.run_btn.setProperty("paused", True)
         elif state == "stopping":
-            self.run_btn.setText("正在终止…")
-            self.run_btn.setIcon(line_icon("pause", theme.CARD, 16))
+            self.run_btn.setIcon(transport_icon("pause", "#FFFFFF", 18))
+            self.run_btn.setToolTip("正在终止…")
+            self.run_btn.setProperty("paused", False)
         else:
-            self.run_btn.setText("开始队列")
-            self.run_btn.setIcon(line_icon("play-solid", theme.CARD, 16))
+            self.run_btn.setIcon(transport_icon("play", "#FFFFFF", 16))
+            self.run_btn.setToolTip("开始队列")
+            self.run_btn.setProperty("paused", False)
+        self.run_btn.style().unpolish(self.run_btn)
+        self.run_btn.style().polish(self.run_btn)
         self.stop_btn.setEnabled(state in ("running", "paused"))
         self.next_btn.setEnabled(bool(self.engine.active_task_id))
         current = self.store.get_task(self.engine.active_task_id) if self.engine.active_task_id else None
@@ -614,6 +780,47 @@ class QueuePage(QWidget):
         self.engine.start()
         self._update_controls()
 
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.run_btn:
+            etype = event.type()
+            if etype == QEvent.Type.Enter:
+                self._run_glow.setEnabled(True)
+                self._animate_run_button(1.0)
+            elif etype == QEvent.Type.Leave:
+                self._animate_run_button(0.0)
+                self._run_glow.setEnabled(False)
+        return super().eventFilter(obj, event)
+
+    def _animate_run_button(self, target: float) -> None:
+        if self._run_anim is not None:
+            self._run_anim.stop()
+        anim = QVariantAnimation(self)
+        anim.setDuration(120)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.setStartValue(self._run_anim_value)
+        anim.setEndValue(target)
+        anim.valueChanged.connect(self._set_run_button_scale)
+        self._run_anim = anim
+        anim.start()
+
+    def _set_run_button_scale(self, value: float) -> None:
+        # 只动光晕，不改尺寸：改尺寸会让整行重新布局，鼠标一碰页面就"跳"
+        value = max(0.0, min(1.0, float(value)))
+        self._run_anim_value = value
+        self._run_glow.setBlurRadius(16 + 14 * value)
+        self._run_glow.setEnabled(value > 0.01)
+
+    def _open_header_menu(self) -> None:
+        items = [
+            ("新建任务", line_icon("add"), self._new_task),
+            ("自动驾驶…", line_icon("bot"), self._open_autopilot),
+            ("显示 / 隐藏概览", line_icon("view"), self._toggle_inspector),
+            ("切换到看板", line_icon("tiles"), lambda: self._set_view(0)),
+            ("切换到清单", line_icon("list"), lambda: self._set_view(1)),
+            ("终止队列", line_icon("stop"), self._stop_queue),
+        ]
+        open_popover(self.header_more, items)
+
     def _toggle_inspector(self) -> None:
         self.config.inspector_collapsed = not self.config.inspector_collapsed
         self.store.save_config(self.config)
@@ -621,8 +828,45 @@ class QueuePage(QWidget):
 
     def _apply_inspector_state(self) -> None:
         collapsed = bool(self.config.inspector_collapsed)
-        self.inspector.setVisible(not collapsed)
         self.inspector_btn.setToolTip("显示概览面板" if collapsed else "隐藏概览面板")
+        self._animate_inspector(0 if collapsed else self._inspector_target())
+
+    def _on_inspector_drag(self, width: int) -> None:
+        # 拖动时立刻停止开合动画，否则动画会不断覆盖拖动结果
+        if self._inspector_anim is not None:
+            self._inspector_anim.stop()
+            self._inspector_anim = None
+        self._set_inspector_width(width)
+
+    def _inspector_target(self) -> int:
+        return max(260, min(460, int(getattr(self.config, "inspector_width", 320))))
+
+    def _save_inspector_width(self, width: int) -> None:
+        self.config.inspector_width = max(260, min(460, int(width)))
+        self.store.save_config(self.config)
+
+    def _set_inspector_width(self, width: int) -> None:
+        width = max(0, int(width))
+        if width:
+            self.inspector.setVisible(True)
+        self.inspector.setMinimumWidth(width)
+        self.inspector.setMaximumWidth(width)
+
+    def _animate_inspector(self, width: int) -> None:
+        if width:
+            # 先显示再动画，避免点击任务后要等动画跑完才看到面板
+            self.inspector.setVisible(True)
+        if self._inspector_anim is not None:
+            self._inspector_anim.stop()
+        anim = QVariantAnimation(self)
+        anim.setDuration(150)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.setStartValue(self.inspector.width())
+        anim.setEndValue(width)
+        anim.valueChanged.connect(self._set_inspector_width)
+        anim.finished.connect(lambda: self.inspector.hide() if width == 0 else None)
+        self._inspector_anim = anim
+        anim.start()
 
     def _on_board_layout(self, state: dict) -> None:
         self.config.board_layout = state
@@ -658,14 +902,66 @@ class QueuePage(QWidget):
         self.refresh(force=True)
         self.filter_changed.emit(key)
 
+    def _clear_filters(self) -> None:
+        self._search = ""
+        self.search_edit.blockSignals(True)
+        self.search_edit.clear()
+        self.search_edit.blockSignals(False)
+        self.set_agent_filter("")
+
     def _select_task(self, task_id: str) -> None:
         if self.selected_id == task_id and self.detail.isVisible():
             return
         self.selected_id = task_id
         self.queue_list.set_selected(task_id)
         self.board.set_selected(task_id)
+        if self.view_stack.currentIndex() == 0:
+            self._set_view(1)
         self.rail_stack.setCurrentWidget(self.detail)
         self.detail.show_task(task_id)
+        if self.config.inspector_collapsed:
+            self.config.inspector_collapsed = False
+            self._apply_inspector_state()
+
+    def _quick_add(self, text: str = "") -> None:
+        text = (text or "").strip()
+        if not text:
+            return
+        task = Task(title=text, prompt=text, agent=self.config.agent, cwd=self.config.cwd)
+        self.store.add_task(task)
+        self.refresh(force=True)
+        self.engine.signals.queue_updated.emit()
+        self.notify.emit("任务已加入队列", "success")
+
+    def _toggle_complete(self, task_id: str) -> None:
+        task = self.store.get_task(task_id)
+        if not task:
+            return
+        if task.status in RUNNING or task.status == TaskStatus.awaiting.value:
+            self.notify.emit("执行中的任务不能标记完成", "warning")
+            return
+        task.status = (
+            TaskStatus.queued.value
+            if task.status == TaskStatus.done.value
+            else TaskStatus.done.value
+        )
+        self.store.save_task(task)
+        self.refresh(force=True)
+        self.engine.signals.queue_updated.emit()
+
+    def _on_run_requested(self, task_id: str, run_id: str) -> None:
+        if run_id:
+            self._select_run(task_id, run_id)
+            return
+        self._select_task(task_id)
+        if self.engine.state != "running":
+            ids = [task.id for task in self.store.list_tasks()]
+            if task_id in ids:
+                ids.remove(task_id)
+                ids.insert(0, task_id)
+                self.store.reorder_tasks(ids)
+            self.engine.start()
+        self._update_controls()
 
     def _select_run(self, task_id: str, run_id: str) -> None:
         self.selected_id = task_id
@@ -893,7 +1189,9 @@ class QueuePage(QWidget):
         ids = [task.id for task in self.store.list_tasks()]
         if task_id not in ids:
             return
-        if before_id and before_id in ids and before_id != task_id:
+        if before_id == task_id:
+            return
+        if before_id and before_id in ids:
             target = ids.index(before_id)
         else:
             target = len(ids)

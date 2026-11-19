@@ -139,8 +139,11 @@ class AppConfig:
     autopilot_rounds: int = 5
     autopilot_minutes: int = 0
     autopilot_auto_accept: bool = True
+    ui_font_scale: float = 1.2
     board_layout: dict = field(default_factory=dict)
-    inspector_collapsed: bool = False
+    inspector_collapsed: bool = True
+    inspector_width: int = 320
+    theme_mode: str = "dark"
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=2)

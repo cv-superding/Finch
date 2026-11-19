@@ -3,6 +3,7 @@ from __future__ import annotations
 from ..config import AppConfig
 from .base import AgentAdapter, AgentEvent, AgentEventParser, AgentRequest, LaunchSpec
 from .claude import ClaudeAdapter
+from .codebuddy import CodeBuddyAdapter
 from .codex import CodexAdapter
 from .cursor import CursorAdapter
 from .mock import MockAdapter
@@ -12,6 +13,7 @@ from .zcode import ZCodeAdapter
 
 ADAPTER_CLASSES: list[type[AgentAdapter]] = [
     ClaudeAdapter,
+    CodeBuddyAdapter,
     CodexAdapter,
     ZCodeAdapter,
     OpenCodeAdapter,

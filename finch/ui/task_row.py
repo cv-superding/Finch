@@ -2,56 +2,81 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QMimeData, QPoint, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QDrag
+from PyQt6.QtCore import (
+    QEvent,
+    QMimeData,
+    QPoint,
+    QPointF,
+    QRectF,
+    QSize,
+    Qt,
+    pyqtProperty,
+    pyqtSignal,
+)
+from PyQt6.QtGui import QColor, QDrag, QFont, QIcon, QPainter, QPen
 from PyQt6.QtWidgets import (
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QPushButton,
     QVBoxLayout,
     QWidget,
-)
-from qfluentwidgets import (
-    FluentIcon,
-    CaptionLabel,
-    PushButton,
-    IconWidget,
-    RadioButton,
-    StrongBodyLabel,
-    TransparentToolButton,
 )
 
 from ..agents import adapter_label
 from ..models import Run, Task, TaskStatus
 from . import theme
 from .action_popover import open_popover
-from .agent_icons import agent_qicon
-from .glyphs import line_icon
-from .widgets import ElidedLabel, format_duration
+from .glyphs import check_icon, line_icon, transport_icon
+from .widgets import ElidedLabel, StatusDot, format_duration
 
 DRAG_MIME = "application/x-finch-task"
 ACTIVE = ("running", "tool", "resuming", "patching", "validating")
 
 
-class DragHandle(TransparentToolButton):
-    """Library tool button that starts a drag to reorder the queue."""
+def _blend(a: QColor, b: QColor, ratio: float) -> QColor:
+    """QColor.lerp is not exposed by this PyQt6 build."""
+    ratio = max(0.0, min(1.0, float(ratio)))
+    return QColor(
+        round(a.red() + (b.red() - a.red()) * ratio),
+        round(a.green() + (b.green() - a.green()) * ratio),
+        round(a.blue() + (b.blue() - a.blue()) * ratio),
+    )
+
+
+class DragHandle(QWidget):
+    """Six dot grip that starts a drag to reorder the queue."""
 
     def __init__(self, row: "TaskRow", parent=None):
         super().__init__(parent)
         self.row = row
         self._press: QPoint | None = None
         self._draggable = True
-        self.setIcon(theme.fluent_icon("move"))
-        self.setIconSize(QSize(14, 14))
-        self.setFixedSize(20, 20)
+        self.setFixedSize(14, 22)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.setToolTip("拖动排序")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
 
     def set_draggable(self, value: bool) -> None:
         self._draggable = value
-        self.setCursor(Qt.CursorShape.OpenHandCursor if value else Qt.CursorShape.ArrowCursor)
+        self.setCursor(
+            Qt.CursorShape.OpenHandCursor if value else Qt.CursorShape.ArrowCursor
+        )
         self.setToolTip("拖动排序" if value else "")
-        self.setEnabled(value)
+        self.setVisible(value)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(theme.SUBTLE))
+        for row in range(3):
+            for col in range(2):
+                painter.drawEllipse(
+                    QPointF(4 + col * 6, 5 + row * 6), 1.3, 1.3
+                )
 
     def mousePressEvent(self, event) -> None:
         if self._draggable and event.button() == Qt.MouseButton.LeftButton:
@@ -67,41 +92,59 @@ class DragHandle(TransparentToolButton):
             return
         if (event.position().toPoint() - self._press).manhattanLength() < 8:
             return
-        drag = QDrag(self)
-        mime = QMimeData()
-        mime.setData(DRAG_MIME, self.row.task_id.encode("utf-8"))
-        drag.setMimeData(mime)
-        pixmap = self.row.grab()
-        if pixmap.width() > 620:
-            pixmap = pixmap.scaledToWidth(620, Qt.TransformationMode.SmoothTransformation)
-        drag.setPixmap(pixmap)
-        drag.setHotSpot(QPoint(24, 24))
         self._press = None
-        drag.exec(Qt.DropAction.MoveAction)
+        self.row.start_drag()
 
 
-class StatusMarker(QWidget):
-    """Fluent radio button / progress ring that shows the task state."""
+class TaskCard(QFrame):
+    """Flat card surface: no shadow, 1px border, 150ms hover."""
 
-    def __init__(self, status: str = "queued", parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._status = status
-        self.setFixedWidth(20)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        self.radio = RadioButton(self)
-        self.radio.setEnabled(False)
-        layout.addWidget(self.radio)
-        self._apply()
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self._hover = 0.0
+        self._selected = False
+        self._live = False
+        self._done = False
 
-    def set_status(self, status: str) -> None:
-        if status != self._status:
-            self._status = status
-            self._apply()
+    def set_hover_value(self, value: float) -> None:
+        self._hover = max(0.0, min(1.0, float(value)))
+        self.update()
 
-    def _apply(self) -> None:
-        self.radio.setChecked(self._status == TaskStatus.done.value)
+    def set_flags(self, *, selected: bool = False, live: bool = False, done: bool = False) -> None:
+        self._selected = selected
+        self._live = live
+        self._done = done
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        base = QColor(theme.CARD)
+        if self._done:
+            base = QColor(theme.BG_SOFT)
+        bg = _blend(base, QColor(theme.SURFACE_2), self._hover)
+        if self._selected:
+            bg = QColor(theme.SURFACE_2)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, 8, 8)
+
+        border = QColor(theme.BORDER_STRONG)
+        if self._selected:
+            border = QColor(theme.ACCENT)
+        painter.setPen(QPen(border, 1))
+        painter.drawRoundedRect(rect, 8, 8)
+
+        if self._live:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(theme.ACCENT))
+            painter.drawRoundedRect(
+                QRectF(0, 9, 2.5, max(6, self.height() - 18)), 1.25, 1.25
+            )
 
 
 class ChildRunRow(QFrame):
@@ -115,8 +158,8 @@ class ChildRunRow(QFrame):
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(8)
         _bg, fg = theme.RUN_TONES.get(run.kind, theme.RUN_TONES["main"])
-        self.tag = CaptionLabel(run.label)
-        self.tag.setStyleSheet(f"color: {fg}; font-weight: 600;")
+        self.tag = QLabel(run.label)
+        self.tag.setStyleSheet(f"color: {fg}; font-size: 11px; font-weight: 600;")
         layout.addWidget(self.tag, 0, Qt.AlignmentFlag.AlignTop)
         text_col = QVBoxLayout()
         text_col.setSpacing(2)
@@ -134,7 +177,7 @@ class ChildRunRow(QFrame):
             "stopped": theme.SUBTLE,
             "running": theme.BLUE_TINT,
         }.get(run.status, theme.SUBTLE)
-        state = CaptionLabel(
+        state = QLabel(
             {
                 "completed": "完成",
                 "interrupted": "中断",
@@ -143,10 +186,10 @@ class ChildRunRow(QFrame):
                 "running": "执行中",
             }.get(run.status, run.status)
         )
-        state.setStyleSheet(f"color: {status_color}; font-weight: 500;")
+        state.setStyleSheet(f"color: {status_color}; font-size: 11px; font-weight: 500;")
         layout.addWidget(state)
-        duration = CaptionLabel(format_duration(run.duration))
-        duration.setStyleSheet(f"color: {theme.SUBTLE};")
+        duration = QLabel(format_duration(run.duration))
+        duration.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 11px;")
         layout.addWidget(duration)
 
     def mouseReleaseEvent(self, event) -> None:
@@ -170,6 +213,8 @@ class TaskRow(QWidget):
     retry_requested = pyqtSignal(str)
     delete_requested = pyqtSignal(str)
     run_requested = pyqtSignal(str, str)
+    pause_requested = pyqtSignal()
+    complete_toggled = pyqtSignal(str)
 
     def __init__(
         self,
@@ -188,144 +233,271 @@ class TaskRow(QWidget):
         self._selected = False
         self._hover = False
         self._child_sig = None
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self._press_pos: QPoint | None = None
+        self._hover_anim = None
+
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 0, 18, 0)
+        root.setContentsMargins(0, 0, 0, 8)
         root.setSpacing(0)
 
-        self.main = QWidget()
-        self.main.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.main_layout = QHBoxLayout(self.main)
-        self.main_layout.setContentsMargins(0, 4, 0, 4)
-        self.main_layout.setSpacing(6)
+        self.body = TaskCard()
+        body_layout = QVBoxLayout(self.body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+
+        inner = QWidget()
+        self.inner = inner
+        self.main_layout = QHBoxLayout(inner)
+        self.main_layout.setContentsMargins(11, 9, 11, 9)
+        self.main_layout.setSpacing(10)
+
         self.drag_handle = DragHandle(self)
         self.main_layout.addWidget(self.drag_handle)
-        self.marker = StatusMarker(task.status)
-        self.main_layout.addWidget(self.marker)
-        self.body = QFrame()
-        self.body.setObjectName("TaskBody")
-        body_layout = QVBoxLayout(self.body)
-        body_layout.setContentsMargins(10, 8, 10, 8)
-        body_layout.setSpacing(4)
 
-        title_row = QHBoxLayout()
-        title_row.setSpacing(6)
+        self.check = QPushButton()
+        self.check.setFixedSize(16, 16)
+        self.check.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.check.setToolTip("标记完成 / 取消完成")
+        self.check.clicked.connect(lambda: self.complete_toggled.emit(self.task_id))
+        self.main_layout.addWidget(self.check)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(3)
         self.title = ElidedLabel(task.title or "未命名任务")
-        self.title.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {theme.TEXT};")
-        title_row.addWidget(self.title, 1)
-        self.pill = CaptionLabel("")
-        self.pill.setStyleSheet(f"color: {theme.MUTED}; font-weight: 500;")
-        title_row.addWidget(self.pill, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.more_btn = TransparentToolButton()
-        self.more_btn.setIcon(theme.fluent_icon("more"))
-        self.more_btn.setIconSize(QSize(15, 15))
-        self.more_btn.setFixedSize(24, 24)
-        self.more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.more_btn.setToolTip("更多操作")
-        self.more_btn.clicked.connect(self._open_menu)
-        title_row.addWidget(self.more_btn)
-        body_layout.addLayout(title_row)
+        self.title.setObjectName("TaskTitle")
+        text_col.addWidget(self.title)
 
-        self.subtitle = ElidedLabel("")
-        self.subtitle.setStyleSheet(f"color: {theme.MUTED}; font-size: 12px;")
-        body_layout.addWidget(self.subtitle)
-
-        meta_row = QHBoxLayout()
-        meta_row.setSpacing(6)
-        self.badge = IconWidget()
-        self.badge.setFixedSize(16, 16)
-        meta_row.addWidget(self.badge)
-        self.agent_label = CaptionLabel("")
-        self.agent_label.setStyleSheet(f"color: {theme.MUTED};")
-        meta_row.addWidget(self.agent_label)
+        meta = QHBoxLayout()
+        meta.setSpacing(6)
+        self.agent_label = QLabel("")
+        self.agent_label.setStyleSheet(f"color: {theme.MUTED}; font-size: 12px;")
+        meta.addWidget(self.agent_label)
+        meta.addWidget(self._separator())
+        self.status_dot = StatusDot("queued", 6)
+        meta.addWidget(self.status_dot)
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet(f"color: {theme.MUTED}; font-size: 12px;")
+        meta.addWidget(self.status_label)
+        self.meta_sep = self._separator()
+        self.meta_sep.setVisible(False)
+        meta.addWidget(self.meta_sep)
         self.meta_label = ElidedLabel("")
         self.meta_label.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 12px;")
-        meta_row.addWidget(self.meta_label, 1)
-        body_layout.addLayout(meta_row)
-        self.main_layout.addWidget(self.body, 1)
-        root.addWidget(self.main)
+        meta.addWidget(self.meta_label, 1)
+        text_col.addLayout(meta)
+        self.main_layout.addLayout(text_col, 1)
+
+        self.duration = QLabel("—")
+        self.duration.setStyleSheet(
+            f"color: {theme.SUBTLE}; font-family: {theme.mono_family()}; font-size: 11.5px;"
+        )
+        self.duration.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.main_layout.addWidget(self.duration)
+
+        self.play = QPushButton()
+        self.play.setFixedSize(26, 26)
+        self.play.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.play.setToolTip("开始这条任务")
+        self.play.clicked.connect(self._on_play)
+        self.main_layout.addWidget(self.play)
+
+        self.more_btn = QPushButton()
+        self.more_btn.setFixedSize(22, 22)
+        self.more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.more_btn.setIcon(line_icon("more", theme.SUBTLE, 15))
+        self.more_btn.setIconSize(QSize(15, 15))
+        self.more_btn.setToolTip("更多操作")
+        self.more_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none; border-radius: 5px; }"
+            f"QPushButton:hover {{ background: {theme.SURFACE_2}; }}"
+        )
+        self.more_btn.clicked.connect(self._open_menu)
+        self.main_layout.addWidget(self.more_btn)
+
+        # 悬停才显示操作，但保留占位避免标题在悬停时抖动
+        self._play_fx = QGraphicsOpacityEffect(self.play)
+        self._play_fx.setOpacity(0.0)
+        self.play.setGraphicsEffect(self._play_fx)
+        self._more_fx = QGraphicsOpacityEffect(self.more_btn)
+        self._more_fx.setOpacity(0.0)
+        self.more_btn.setGraphicsEffect(self._more_fx)
+
+        body_layout.addWidget(inner)
+        root.addWidget(self.body)
 
         self.children = QWidget()
         self.children_layout = QVBoxLayout(self.children)
-        self.children_layout.setContentsMargins(44, 0, 14, 8)
+        self.children_layout.setContentsMargins(46, 4, 14, 6)
         self.children_layout.setSpacing(2)
         root.addWidget(self.children)
         self.children.setVisible(False)
+
         self.update_data(task, runs, default_agent)
+
+        for surface in (
+            self.body,
+            inner,
+            self.title,
+            self.agent_label,
+            self.status_label,
+            self.meta_label,
+            self.duration,
+        ):
+            surface.installEventFilter(self)
+
+    @staticmethod
+    def _separator() -> QLabel:
+        label = QLabel("·")
+        label.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 12px;")
+        return label
+
+    def start_drag(self) -> None:
+        if self._task.status in ACTIVE:
+            return
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(DRAG_MIME, self.task_id.encode("utf-8"))
+        drag.setMimeData(mime)
+        pixmap = self.grab()
+        if pixmap.width() > 620:
+            pixmap = pixmap.scaledToWidth(
+                620, Qt.TransformationMode.SmoothTransformation
+            )
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(QPoint(24, 24))
+        drag.exec(Qt.DropAction.MoveAction)
+
+    def eventFilter(self, obj, event) -> bool:
+        etype = event.type()
+        if (
+            etype == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            if self._task.status not in ACTIVE:
+                self._press_pos = event.position().toPoint()
+        elif etype == QEvent.Type.MouseMove and self._press_pos is not None:
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                if (
+                    event.position().toPoint() - self._press_pos
+                ).manhattanLength() >= 8:
+                    self._press_pos = None
+                    self.start_drag()
+                    return True
+        elif etype == QEvent.Type.MouseButtonRelease:
+            self._press_pos = None
+        return super().eventFilter(obj, event)
 
     def _effective_agent(self) -> str:
         return self._task.agent or self._default_agent
 
-    def update_data(self, task: Task, runs: list[Run], default_agent: str, selected: bool | None = None) -> None:
+    def _on_play(self) -> None:
+        if self._task.status in ACTIVE:
+            self.pause_requested.emit()
+        else:
+            self.run_requested.emit(self.task_id, "")
+
+    def update_data(
+        self,
+        task: Task,
+        runs: list[Run],
+        default_agent: str,
+        selected: bool | None = None,
+    ) -> None:
         self._task = task
         self._runs = runs
         self._default_agent = default_agent
         if selected is not None:
             self._selected = selected
+
         agent = self._effective_agent()
-        self.badge.setIcon(agent_qicon(agent))
-        self.marker.set_status(task.status)
-        self._update_pill(task.status)
         title = task.title or _first_line(task.prompt) or "未命名任务"
         self.title.setText(title)
         self.setToolTip(task.prompt[:800])
-        self.subtitle.setText(self._subtitle_text(task))
         self.agent_label.setText(adapter_label(agent))
+        self.status_dot.set_status(task.status)
+        self.status_label.setText(task.status_label)
+        self.duration.setText(format_duration(task.duration) if task.duration else "")
+
         stats = []
+        if task.tool_count:
+            stats.append(f"工具 {task.tool_count}")
         if task.resume_count:
             stats.append(f"续传 {task.resume_count}")
         if task.followup_count:
             stats.append(f"补做 {task.followup_count}")
-        if task.tool_count:
-            stats.append(f"工具 {task.tool_count}")
-        if task.duration:
-            stats.append(format_duration(task.duration))
-        self.meta_label.setText(("·   " + "   ·   ".join(stats)) if stats else "")
+        subtitle = _subtitle_text(task)
+        label = task.status_label
+        if subtitle.startswith(label + " · "):
+            subtitle = subtitle[len(label) + 3:]
+        elif subtitle == label:
+            subtitle = ""
+        if subtitle:
+            stats.append(subtitle)
+        self.meta_label.setText("  ·  ".join(stats))
+        self.meta_sep.setVisible(bool(stats))
+
         active = task.status in ACTIVE
+        done = task.status == TaskStatus.done.value
         self.drag_handle.set_draggable(not active)
-        self._rebuild_children()
         self._apply_style()
+        self._rebuild_children()
+        self.play.setVisible(not done)
+        self._show_actions(self._hover or self._selected)
 
-    def _update_pill(self, status: str) -> None:
-        from ..models import STATUS_LABELS
-
-        fg, _bg = theme.STATUS_COLORS.get(status, (theme.MUTED, theme.SLATE_SOFT))
-        self.pill.setText(STATUS_LABELS.get(status, status))
-        self.pill.setStyleSheet(f"color: {fg}; font-weight: 500;")
-
-    def _subtitle_text(self, task: Task) -> str:
-        status = task.status
-        if status in (TaskStatus.running.value, TaskStatus.tool.value, TaskStatus.resuming.value, TaskStatus.patching.value):
-            return task.progress or "正在执行"
-        if status == TaskStatus.validating.value:
-            return task.progress or "正在解析回复并校验完成度"
-        if status == TaskStatus.awaiting.value:
-            return "补做提示词已生成，等待你确认"
-        if status in (TaskStatus.failed.value, TaskStatus.attention.value):
-            return task.attention_reason or task.error or task.progress or "需要人工处理"
-        if status == TaskStatus.interrupted.value:
-            return task.progress or "检测到中断，可继续"
-        if status == TaskStatus.done.value:
-            return task.summary or "全部验收项已落地"
-        return _first_line(task.prompt) or task.progress or "等待执行"
+    def _show_actions(self, visible: bool) -> None:
+        opacity = 1.0 if visible else 0.0
+        self._play_fx.setOpacity(opacity)
+        self._more_fx.setOpacity(opacity)
+        self.play.setEnabled(visible)
+        self.more_btn.setEnabled(visible)
 
     def _apply_style(self) -> None:
-        if self._selected:
-            bg = theme.ACCENT_SOFT
-        elif self._hover:
-            bg = theme.BG_SOFT
-        else:
-            bg = "transparent"
-        self.body.setStyleSheet(
-            f"QFrame#TaskBody {{ background: {bg}; border: 1px solid transparent; border-radius: 8px; }}"
+        active = self._task.status in ACTIVE
+        done = self._task.status == TaskStatus.done.value
+        self.body.set_flags(selected=self._selected, live=active, done=done)
+
+        fg, _bg = theme.STATUS_COLORS.get(
+            self._task.status, (theme.MUTED, theme.SLATE_SOFT)
+        )
+        self.check.setStyleSheet(
+            "QPushButton { border: 1px solid #3A3A42; border-radius: 8px; background: transparent; }"
+            "QPushButton:hover { border-color: #6E6BF0; }"
+            + (
+                "QPushButton { background: #3FB950; border-color: #3FB950; }"
+                if done
+                else ""
+            )
+        )
+        self.check.setIcon(check_icon("#FFFFFF", 11, 1.7) if done else QIcon())
+
+        # 卡片内是图标按钮，不是实心色块：运行中用品牌色暂停，其余用中性播放
+        icon_color = theme.ACCENT if active else theme.MUTED
+        self.play.setIcon(
+            transport_icon("pause" if active else "play", icon_color, 14)
+        )
+        self.play.setStyleSheet(
+            "QPushButton { background: transparent; border: none; border-radius: 6px; }"
+            f"QPushButton:hover {{ background: {theme.SURFACE_2}; }}"
+        )
+
+        font = QFont(theme.font_family())
+        font.setPixelSize(15)
+        font.setWeight(QFont.Weight.Medium)
+        font.setStrikeOut(done)
+        self.title.setFont(font)
+        self.title.setStyleSheet(
+            f"color: {theme.SUBTLE if done else theme.TEXT};"
         )
 
     def _rebuild_children(self) -> None:
         children = [run for run in self._runs if run.kind != "main"]
         signature = tuple(
-            (run.id, run.status, len(run.output or ""), run.tool_count) for run in children
+            (run.id, run.status, len(run.output or ""), run.tool_count)
+            for run in children
         )
         if signature == self._child_sig:
+            if not self._selected:
+                self.children.setVisible(False)
             return
         self._child_sig = signature
         while self.children_layout.count():
@@ -333,23 +505,21 @@ class TaskRow(QWidget):
             widget = item.widget()
             if widget:
                 widget.deleteLater()
-        if not children:
+        if not children or not self._selected:
             self.children.setVisible(False)
             self.updateGeometry()
             return
         self.children.setVisible(True)
-        shown = children[-4:]
-        if len(children) > len(shown):
-            more = CaptionLabel(f"还有 {len(children) - len(shown)} 条续传/补做记录，点击任务查看全部")
-            more.setStyleSheet(f"color: {theme.SUBTLE};")
-            self.children_layout.addWidget(more)
-        for run in shown:
+        for run in children[-4:]:
             row = ChildRunRow(run)
-            row.clicked.connect(lambda run_id, task_id=self.task_id: self.run_requested.emit(task_id, run_id))
+            row.clicked.connect(
+                lambda run_id, task_id=self.task_id: self.run_requested.emit(
+                    task_id, run_id
+                )
+            )
             self.children_layout.addWidget(row)
 
     def _open_menu(self) -> None:
-        active = self._task.status in ACTIVE
         items = [
             ("编辑任务", line_icon("edit"), lambda: self.edit_requested.emit(self.task_id)),
             ("优化提示词", line_icon("optimize"), lambda: self.optimize_requested.emit(self.task_id)),
@@ -367,16 +537,35 @@ class TaskRow(QWidget):
     def set_selected(self, selected: bool) -> None:
         self._selected = selected
         self._apply_style()
+        self._rebuild_children()
+        self.play.setVisible(self._task.status != TaskStatus.done.value)
+        self._show_actions(self._hover or self._selected)
 
     def enterEvent(self, event) -> None:
         self._hover = True
-        self._apply_style()
+        self._animate_hover(1.0)
+        self.play.setVisible(self._task.status != TaskStatus.done.value)
+        self._show_actions(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
         self._hover = False
-        self._apply_style()
+        self._animate_hover(0.0)
+        self._show_actions(self._selected)
         super().leaveEvent(event)
+
+    def _animate_hover(self, target: float) -> None:
+        from PyQt6.QtCore import QVariantAnimation
+
+        if self._hover_anim is not None:
+            self._hover_anim.stop()
+        anim = QVariantAnimation(self)
+        anim.setDuration(150)
+        anim.setStartValue(self.body._hover)
+        anim.setEndValue(target)
+        anim.valueChanged.connect(self.body.set_hover_value)
+        self._hover_anim = anim
+        anim.start()
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -385,20 +574,41 @@ class TaskRow(QWidget):
 
 
 class AddTaskRow(QWidget):
-    """Library command button used as the "add next task" row."""
+    """Inline dashed input that creates a task on enter."""
 
     clicked = pyqtSignal()
+    quick_add_requested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(44, 2, 18, 8)
-        layout.setSpacing(0)
-        self.button = PushButton("添加下一条任务", self)
-        self.button.setIcon(theme.fluent_icon("add"))
-        self.button.setToolTip("新增一条主提示词")
-        self.button.clicked.connect(self.clicked.emit)
-        layout.addWidget(self.button, 1)
+        layout.setContentsMargins(0, 2, 0, 8)
+        layout.setSpacing(8)
+        self.edit = QLineEdit()
+        self.edit.setPlaceholderText("添加任务，回车创建")
+        self.edit.setFixedHeight(34)
+        self.edit.setStyleSheet(
+            f"QLineEdit {{ background: transparent; border: 1px dashed {theme.BORDER_INPUT};"
+            " border-radius: 8px; color: #8E8E96; font-size: 12.5px; padding-left: 12px; }"
+            f"QLineEdit:focus {{ border: 1px solid {theme.ACCENT}; color: {theme.TEXT}; }}"
+        )
+        self.edit.returnPressed.connect(self._submit)
+        layout.addWidget(self.edit, 1)
+        self.detail_btn = QPushButton("详细")
+        self.detail_btn.setObjectName("GhostButton")
+        self.detail_btn.setFixedHeight(34)
+        self.detail_btn.setFixedWidth(60)
+        self.detail_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.detail_btn.setToolTip("打开完整任务编辑器")
+        self.detail_btn.clicked.connect(self.clicked.emit)
+        layout.addWidget(self.detail_btn)
+
+    def _submit(self) -> None:
+        text = self.edit.text().strip()
+        if not text:
+            return
+        self.edit.clear()
+        self.quick_add_requested.emit(text)
 
 
 def _first_line(text: str, limit: int = 90) -> str:
@@ -406,6 +616,31 @@ def _first_line(text: str, limit: int = 90) -> str:
         stripped = line.strip().lstrip("#").strip()
         if stripped:
             return stripped[:limit]
+    return ""
+
+
+def _subtitle_text(task: Task) -> str:
+    status = task.status
+    label = task.status_label
+    if status in (
+        TaskStatus.running.value,
+        TaskStatus.tool.value,
+        TaskStatus.resuming.value,
+        TaskStatus.patching.value,
+    ):
+        text = (task.progress or "").strip()
+        return "" if text in (label, "执行中", "工具执行中", "进行中") else text
+    if status == TaskStatus.validating.value:
+        text = (task.progress or "").strip()
+        return "" if text == label else (text or "正在校验完成度")
+    if status == TaskStatus.awaiting.value:
+        return "等待你确认补做"
+    if status in (TaskStatus.failed.value, TaskStatus.attention.value):
+        return task.attention_reason or task.error or "需要人工处理"
+    if status == TaskStatus.interrupted.value:
+        return task.progress or "检测到中断，可继续"
+    if status == TaskStatus.done.value:
+        return task.summary or "全部验收项已落地"
     return ""
 
 

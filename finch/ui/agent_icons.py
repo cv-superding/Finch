@@ -77,3 +77,21 @@ def fallback_pixmap(key: str, size: int = 64) -> QPixmap:
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, badge)
     painter.end()
     return pix
+
+
+@lru_cache(maxsize=64)
+def agent_mono_icon(key: str, color: str, size: int = 16) -> QIcon:
+    """把彩色图标压成单色：空闲 Agent 用线条风格，运行中才显示原色。"""
+    scale = 2
+    base = agent_qicon(key).pixmap(size * scale, size * scale)
+    if base.isNull():
+        return QIcon()
+    out = QPixmap(base.size())
+    out.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(out)
+    painter.drawPixmap(0, 0, base)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(out.rect(), QColor(color))
+    painter.end()
+    out.setDevicePixelRatio(scale)
+    return QIcon(out)

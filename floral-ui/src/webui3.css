@@ -1,0 +1,160 @@
+/* WebUI 3 · 云母材质
+ *
+ * 只覆盖花笺的 @theme 颜色令牌与表面质感，不改任何组件结构。
+ * Mica 的特征：取桌面色调的低饱和底、几乎不透明的着色层、极轻的模糊，
+ * 以及 1px 高光边；不是 Acrylic 那种强模糊 + 高透明。
+ */
+
+html[data-mica="on"]:root {
+  --color-paper: rgba(247, 249, 253, 0.60);
+  --color-paper-warm: rgba(235, 241, 250, 0.56);
+  --color-paper-deep: rgba(198, 211, 230, 0.50);
+  --color-ink: #16212f;
+  --color-ink-soft: #35445a;
+  --color-ink-faint: #5c6878;
+  --color-ink-ghost: #5c6878;
+  --color-cloud: rgba(255, 255, 255, 0.62);
+  --color-stone: #5c6b80;
+  --color-shadow: rgba(24, 42, 70, 0.07);
+  --color-shadow-deep: rgba(24, 42, 70, 0.14);
+  --app-surface-radius: 12px;
+}
+
+html[data-mica="on"][data-theme="dark"]:root {
+  --color-paper: rgba(28, 36, 49, 0.62);
+  --color-paper-warm: rgba(34, 44, 60, 0.58);
+  --color-paper-deep: rgba(74, 90, 112, 0.40);
+  --color-ink: #e9eef6;
+  --color-ink-soft: #bcc8d8;
+  --color-ink-faint: #8f9cb0;
+  --color-ink-ghost: #8f9cb0;
+  --color-cloud: rgba(24, 31, 43, 0.58);
+  --color-stone: #9aa8bc;
+  --color-shadow: rgba(0, 0, 0, 0.34);
+  --color-shadow-deep: rgba(0, 0, 0, 0.52);
+  --color-bamboo-mist: rgba(46, 86, 74, 0.55);
+  --color-bamboo-glow: rgba(62, 112, 96, 0.45);
+}
+
+/* 桌面壁纸色调：云母会把壁纸主色染进窗口，这里用固定的柔和冷色光晕模拟。 */
+html[data-mica="on"] body {
+  margin: 0;
+  background:
+    radial-gradient(1100px 760px at 8% -12%, rgba(122, 164, 226, 0.42), transparent 62%),
+    radial-gradient(900px 680px at 96% 2%, rgba(130, 158, 220, 0.28), transparent 58%),
+    radial-gradient(1000px 720px at 52% 112%, rgba(108, 160, 214, 0.22), transparent 62%),
+    linear-gradient(158deg, #dce5f2 0%, #eef2f8 46%, #d8e2f0 100%);
+  background-attachment: fixed;
+  color-scheme: light;
+}
+
+html[data-mica="on"][data-theme="dark"] body {
+  background:
+    radial-gradient(1100px 760px at 8% -12%, rgba(48, 84, 148, 0.52), transparent 62%),
+    radial-gradient(900px 680px at 96% 2%, rgba(62, 92, 160, 0.34), transparent 58%),
+    radial-gradient(1000px 720px at 52% 112%, rgba(40, 84, 140, 0.30), transparent 62%),
+    linear-gradient(158deg, #101722 0%, #1b2433 48%, #101925 100%);
+  color-scheme: dark;
+}
+
+html[data-mica="on"] #root {
+  isolation: isolate;
+  position: relative;
+  background: transparent;
+}
+
+/* 桌面色调层放在内容之下、页面背景之上；半透明着色层与 backdrop-filter
+   会把它染进窗口，这就是 Mica 与纯半透明背景的区别。 */
+html[data-mica="on"] #root::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(900px 620px at 10% 22%, rgba(92, 142, 216, 0.46), transparent 64%),
+    radial-gradient(760px 560px at 92% 18%, rgba(120, 148, 214, 0.34), transparent 60%),
+    radial-gradient(900px 620px at 46% 108%, rgba(96, 150, 208, 0.30), transparent 66%);
+}
+
+html[data-mica="on"][data-theme="dark"] #root::before {
+  /* §8.3.2 光晕中心下移、亮度降低，避免顶栏下方出现高对比亮带 */
+  background:
+    radial-gradient(900px 620px at 10% 26%, rgba(64, 112, 200, 0.34), transparent 64%),
+    radial-gradient(760px 560px at 92% 22%, rgba(86, 118, 190, 0.28), transparent 60%),
+    radial-gradient(900px 620px at 46% 108%, rgba(46, 104, 172, 0.26), transparent 66%);
+}
+
+/* 着色层：轻微模糊 + 提饱和，保留可读性（不透明度由变量控制）。 */
+html[data-mica="on"] .bg-cloud,
+html[data-mica="on"] .bg-paper,
+html[data-mica="on"] .bg-paper-warm,
+html[data-mica="on"] .bg-bamboo-mist,
+html[data-mica="on"] .bg-paper-deep {
+  -webkit-backdrop-filter: blur(20px) saturate(155%);
+  backdrop-filter: blur(20px) saturate(155%);
+}
+
+/* 1px 高光边：云母材质靠边缘光线区分层级，而不是靠阴影。 */
+html[data-mica="on"] [class*="border-paper-deep"] {
+  border-color: rgba(255, 255, 255, 0.80);
+}
+
+html[data-mica="on"][data-theme="dark"] [class*="border-paper-deep"] {
+  border-color: rgba(255, 255, 255, 0.11);
+}
+
+/* 顶栏在深色云母下不透明，避免壁纸光晕穿过导航区形成亮带（§8.3.2） */
+html[data-mica="on"][data-theme="dark"] .mica-topbar {
+  background-color: #1a2230;
+}
+
+/* §3.4.1 横向滚动的 chips 给一个可滚动渐隐提示 */
+.chips-scroll {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent 100%);
+  /* WebView2 会画出原生横向滚动条，遮在卡片上方；用渐隐代替它 */
+  scrollbar-width: none;
+}
+.chips-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* 卡片 hover 提亮一层，反馈克制。 */
+html[data-mica="on"] [data-row] {
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+html[data-mica="on"] [data-row]:hover {
+  background-color: rgba(255, 255, 255, 0.86);
+}
+html[data-mica="on"][data-theme="dark"] [data-row]:hover {
+  background-color: rgba(38, 49, 65, 0.88);
+}
+
+/* 实心主按钮保留花笺竹绿，只补一道高光。 */
+html[data-mica="on"] .bg-bamboo {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24);
+}
+
+/* 细滚动条，不打断材质。 */
+html[data-mica="on"] * {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(120, 140, 165, 0.42) transparent;
+}
+html[data-mica="on"] *::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+html[data-mica="on"] *::-webkit-scrollbar-thumb {
+  background: rgba(120, 140, 165, 0.38);
+  border-radius: 999px;
+}
+html[data-mica="on"] *::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-mica="on"] [data-row] {
+    transition: none;
+  }
+}

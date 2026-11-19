@@ -43,6 +43,7 @@ from .widgets import (
     ConfirmDialog,
     ElidedLabel,
     Select,
+    StatTile,
     StatusDot,
     StatusPill,
     ToggleSwitch,
@@ -65,6 +66,7 @@ def clear_layout(layout) -> None:
         item = layout.takeAt(0)
         widget = item.widget()
         if widget:
+            widget.setParent(None)
             widget.deleteLater()
         else:
             child = item.layout()
@@ -206,8 +208,9 @@ class TaskDetailPanel(QFrame):
         tab_layout.setSpacing(16)
         self.tab_buttons: dict[str, QPushButton] = {}
         for key, label in (("summary", "摘要"), ("records", "执行记录"), ("logs", "完整日志")):
-            button = PushButton(label)
-            button.setCheckable(True)
+            button = QPushButton(label)
+            button.setObjectName("UnderlineTab")
+            button.setProperty("active", key == "summary")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(lambda _=False, k=key: self._switch_tab(k))
             tab_layout.addWidget(button)
@@ -276,6 +279,7 @@ class TaskDetailPanel(QFrame):
         self.log_view.setObjectName("LogView")
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(12000)
+        self.log_view.setPlaceholderText("暂无日志\n任务开始执行后，这里会实时输出 Agent 的原始日志。")
         log_layout.addWidget(self.log_view, 1)
         self.stack.addWidget(self.log_page)
         self._switch_tab("summary")
@@ -406,35 +410,25 @@ class TaskDetailPanel(QFrame):
         )
         self.summary_layout.addWidget(summary)
 
-        chips_host = QWidget()
-        chips = QGridLayout(chips_host)
-        chips.setContentsMargins(0, 0, 0, 0)
-        chips.setHorizontalSpacing(6)
-        chips.setVerticalSpacing(6)
-        for index, (text, tone) in enumerate(
+        stats_host = QWidget()
+        stats = QGridLayout(stats_host)
+        stats.setContentsMargins(0, 0, 0, 0)
+        stats.setHorizontalSpacing(8)
+        stats.setVerticalSpacing(8)
+        for index, (label_text, value, color) in enumerate(
             (
-                (f"完成 {len(task.completed)}", "green"),
-                (f"未完成 {len(task.pending)}", "orange"),
-                (f"问题 {len(task.issues)}", "red"),
-                (f"续传 {task.resume_count}", "muted"),
-                (f"补做 {task.followup_count}", "muted"),
-                (f"工具 {task.tool_count}", "muted"),
+                ("完成", len(task.completed), theme.GREEN),
+                ("未完成", len(task.pending), theme.ORANGE),
+                ("问题", len(task.issues), theme.RED),
+                ("续传", task.resume_count, theme.ORANGE),
+                ("补做", task.followup_count, theme.ORANGE),
+                ("工具", task.tool_count, theme.BLUE),
             )
         ):
-            chip = QLabel(text)
-            bg, fg = {
-                "green": (theme.GREEN_SOFT, theme.GREEN_TINT),
-                "orange": (theme.ORANGE_SOFT, theme.ORANGE_TINT),
-                "red": (theme.RED_SOFT, theme.RED_TINT),
-                "muted": (theme.SLATE_SOFT, theme.MUTED),
-            }[tone]
-            chip.setStyleSheet(
-                f"background: {bg}; color: {fg}; border-radius: 4px; padding: 2px 6px;"
-                "font-size: 12px; font-weight: 500;"
-            )
-            chip.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-            chips.addWidget(chip, index // 3, index % 3, Qt.AlignmentFlag.AlignLeft)
-        self.summary_layout.addWidget(chips_host)
+            tile = StatTile(label_text, str(value))
+            tile.set_color(color)
+            stats.addWidget(tile, index // 3, index % 3)
+        self.summary_layout.addWidget(stats_host)
 
         self.summary_layout.addWidget(self._item_section("已完成", task.completed, theme.GREEN, "暂无记录"))
         self.summary_layout.addWidget(self._item_section("未完成 / 缺漏", task.pending, theme.ORANGE, "没有识别到未完成项"))
@@ -461,10 +455,9 @@ class TaskDetailPanel(QFrame):
         body.setSpacing(6)
         head = QHBoxLayout()
         head.setSpacing(8)
-        dot = QWidget()
-        dot.setFixedSize(7, 7)
-        dot.setStyleSheet(f"background: {color}; border-radius: 3.5px;")
-        head.addWidget(dot)
+        caret = QLabel("▾")
+        caret.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 11px;")
+        head.addWidget(caret)
         label = QLabel(title)
         label.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {theme.TEXT};")
         head.addWidget(label)
@@ -474,7 +467,7 @@ class TaskDetailPanel(QFrame):
         head.addStretch(1)
         body.addLayout(head)
         if not items:
-            empty_label = QLabel(empty)
+            empty_label = QLabel("—   " + empty)
             empty_label.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 12px;")
             body.addWidget(empty_label)
         else:
@@ -733,7 +726,7 @@ class TaskDetailPanel(QFrame):
             return
         text = self._run_logs(self._log_run_id)
         lines = [line for line in text.splitlines() if self._filter_line(line)]
-        self.log_view.setPlainText("\n".join(lines))
+        self.log_view.setPlainText("\n".join(lines) if lines else "")
         if self.autoscroll.isChecked():
             self._scroll_bottom()
 
@@ -771,7 +764,9 @@ class TaskDetailPanel(QFrame):
     def _switch_tab(self, key: str) -> None:
         index = {"summary": 0, "records": 1, "logs": 2}.get(key, 0)
         for name, button in self.tab_buttons.items():
-            button.setChecked(name == key)
+            button.setProperty("active", name == key)
+            button.style().unpolish(button)
+            button.style().polish(button)
         self.stack.setCurrentIndex(index)
         if key == "logs":
             self._load_logs()

@@ -5,13 +5,14 @@ from PyQt6.QtGui import QColor, QDrag, QPainter, QPen
 from PyQt6.QtWidgets import (
     QBoxLayout,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import CaptionLabel, SimpleCardWidget, TransparentToolButton
+from qfluentwidgets import CaptionLabel, TransparentToolButton
 
 from ..agents import adapter_label
 from ..models import Run, STATUS_LABELS, Task, TaskStatus
@@ -49,7 +50,10 @@ MIN_WIDTH = 140
 SNAP_WIDTHS = (160, 200, 240, 280, 320)
 
 
-class BoardCard(SimpleCardWidget):
+class BoardCard(QFrame):
+    """Board card with an explicit background — the library card widget
+    intermittently failed to paint its surface in the dark theme."""
+
     selected = pyqtSignal(str)
     edit_requested = pyqtSignal(str)
     optimize_requested = pyqtSignal(str)
@@ -64,8 +68,6 @@ class BoardCard(SimpleCardWidget):
         self._press_pos: QPoint | None = None
         self.setObjectName("BoardCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setBorderRadius(6)
-        self.setBackgroundColor(QColor(theme.CARD))
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         layout = QVBoxLayout(self)
@@ -86,6 +88,12 @@ class BoardCard(SimpleCardWidget):
         top.addWidget(self.more, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(top)
 
+        # 悬停才显示操作，占位不消失避免标题抖动
+        self._more_fx = QGraphicsOpacityEffect(self.more)
+        self._more_fx.setOpacity(0.0)
+        self.more.setGraphicsEffect(self._more_fx)
+        self.more.setEnabled(False)
+
         foot = QHBoxLayout()
         foot.setSpacing(6)
         self.agent_icon = QLabel()
@@ -103,6 +111,7 @@ class BoardCard(SimpleCardWidget):
         self.meta = ElidedLabel("")
         self.meta.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 11px;")
         layout.addWidget(self.meta)
+        self.set_selected(False)
         self.update_data(task, runs, default_agent)
 
     def update_data(self, task: Task, runs: list[Run], default_agent: str) -> None:
@@ -138,9 +147,25 @@ class BoardCard(SimpleCardWidget):
         self.meta.setToolTip(text)
         self.meta.setVisible(bool(bits))
 
+    def enterEvent(self, event) -> None:
+        self._more_fx.setOpacity(1.0)
+        self.more.setEnabled(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._more_fx.setOpacity(1.0 if self._selected else 0.0)
+        self.more.setEnabled(self._selected)
+        super().leaveEvent(event)
+
     def set_selected(self, selected: bool) -> None:
         self._selected = selected
-        self.setBackgroundColor(QColor(theme.ACCENT_SOFT if selected else theme.CARD))
+        self._more_fx.setOpacity(1.0 if selected or self.underMouse() else 0.0)
+        bg = theme.ACCENT_SOFT if selected else theme.CARD
+        border = theme.ACCENT if selected else theme.BORDER_STRONG
+        self.setStyleSheet(
+            f"QFrame#BoardCard {{ background: {bg}; border: 1px solid {border};"
+            " border-radius: 8px; }"
+        )
 
     def _open_menu(self) -> None:
         open_popover(
@@ -221,6 +246,11 @@ class ColumnGrip(QWidget):
 
 class BoardColumn(QFrame):
     add_requested = pyqtSignal()
+    selected = pyqtSignal(str)
+    edit_requested = pyqtSignal(str)
+    optimize_requested = pyqtSignal(str)
+    retry_requested = pyqtSignal(str)
+    delete_requested = pyqtSignal(str)
     drop_before = pyqtSignal(str, str)  # dragged task id, before id ("" = append)
     column_dragged = pyqtSignal(str, int)  # column key, drop index
     column_hidden = pyqtSignal(str)
@@ -237,7 +267,7 @@ class BoardColumn(QFrame):
         )
         self.setAcceptDrops(True)
         self.setMinimumWidth(MIN_WIDTH)
-        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         root = QVBoxLayout(self)
         self._root_layout = root
         root.setContentsMargins(8, 6, 8, 8)
@@ -256,14 +286,20 @@ class BoardColumn(QFrame):
         self.handle.mousePressEvent = self._handle_press
         self.handle.mouseMoveEvent = self._handle_move
         head.addWidget(self.handle)
+        self.tone_dot = QLabel()
+        self.tone_dot.setFixedSize(6, 6)
+        self.tone_dot.setStyleSheet(f"background: {fg}; border-radius: 3px;")
+        head.addWidget(self.tone_dot)
         self.pill = QLabel(label)
         self.pill.setStyleSheet(
-            f"background: {pill_bg}; color: {fg}; border-radius: 4px; padding: 2px 8px;"
-            "font-size: 12px; font-weight: 600;"
+            f"color: {theme.TEXT_SOFT}; font-size: 12.5px; font-weight: 600;"
         )
         head.addWidget(self.pill)
         self.count = QLabel("0")
-        self.count.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 12px;")
+        self.count.setStyleSheet(
+            f"background: {theme.SURFACE_2}; color: {theme.MUTED}; border-radius: 4px;"
+            " padding: 1px 6px; font-size: 11px; font-weight: 600;"
+        )
         head.addWidget(self.count)
         head.addStretch(1)
         self.menu_btn = TransparentToolButton()
@@ -292,12 +328,12 @@ class BoardColumn(QFrame):
         self.add_btn = TransparentToolButton()
         self.add_btn.setIcon(line_icon("plus", theme.MUTED, 12))
         self.add_btn.setIconSize(QSize(12, 12))
-        self.add_btn.setFixedSize(22, 22)
+        self.add_btn.setFixedSize(20, 20)
         self.add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.add_btn.setToolTip("新增任务")
         self.add_btn.clicked.connect(self.add_requested.emit)
         self.add_btn.setVisible(key == "todo")
-        root.addWidget(self.add_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        head.addWidget(self.add_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.grip = ColumnGrip(self)
         root.addWidget(self.grip, 0, Qt.AlignmentFlag.AlignRight)
@@ -404,12 +440,19 @@ class BoardColumn(QFrame):
                 item = self.cards_layout.takeAt(0)
                 widget = item.widget()
                 if widget:
+                    # 先脱离父级，旧卡片不会在删除前继续画在列里
+                    widget.setParent(None)
                     widget.deleteLater()
             self.cards.clear()
             self._order = ids
             for task in tasks:
                 card = BoardCard(task, runs_map.get(task.id, []), default_agent, self.key == "todo")
                 card.set_selected(task.id == selected_id)
+                card.selected.connect(self.selected.emit)
+                card.edit_requested.connect(self.edit_requested.emit)
+                card.optimize_requested.connect(self.optimize_requested.emit)
+                card.retry_requested.connect(self.retry_requested.emit)
+                card.delete_requested.connect(self.delete_requested.emit)
                 self.cards_layout.addWidget(card)
                 self.cards[task.id] = card
         else:
@@ -526,6 +569,11 @@ class KanbanBoard(QWidget):
             col.column_dragged.connect(self._on_column_dragged)
             col.column_hidden.connect(self._hide_column)
             col.column_width_changed.connect(self._on_width_changed)
+            col.selected.connect(self.selected.emit)
+            col.edit_requested.connect(self.edit_requested.emit)
+            col.optimize_requested.connect(self.optimize_requested.emit)
+            col.retry_requested.connect(self.retry_requested.emit)
+            col.delete_requested.connect(self.delete_requested.emit)
             self.columns[key] = col
         self._rebuild()
 

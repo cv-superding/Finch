@@ -196,30 +196,230 @@ class ElidedLabel(QLabel):
         painter.drawText(rect, int(self.alignment()), elided)
 
 
-class StatusDot(DotInfoBadge):
-    """Library dot badge that mirrors the task state colour."""
+class StatusDot(QWidget):
+    """Small painted status dot — colour carries meaning, no filled block."""
 
-    def __init__(self, status: str = "queued", size: int = 10, parent: QWidget | None = None):
+    def __init__(self, status: str = "queued", size: int = 8, parent: QWidget | None = None):
         super().__init__(parent)
+        self._status = status
+        self._size = size
         self.setFixedSize(size, size)
-        self.set_status(status)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
     def set_status(self, status: str) -> None:
-        fg, _bg = finch_theme.STATUS_COLORS.get(status, (finch_theme.MUTED, finch_theme.SLATE_SOFT))
-        self.setCustomBackgroundColor(QColor(fg), QColor(fg))
+        self._status = status
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        fg, _bg = finch_theme.STATUS_COLORS.get(
+            self._status, (finch_theme.MUTED, finch_theme.SLATE_SOFT)
+        )
+        painter.setBrush(QColor(fg))
+        radius = self._size / 2
+        painter.drawEllipse(
+            QPointF(self.width() / 2, self.height() / 2), radius, radius
+        )
 
 
-class StatusPill(InfoBadge):
-    """Library info badge used as a status chip."""
+class StatusPill(QWidget):
+    """Dot + label chip. No coloured background blocks."""
 
     def __init__(self, status: str = "queued", label: str | None = None, parent: QWidget | None = None):
         super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        self.dot = StatusDot(status, 7)
+        layout.addWidget(self.dot)
+        self.text = QLabel(label or STATUS_LABELS.get(status, status))
+        self.text.setStyleSheet(f"color: {finch_theme.MUTED}; font-size: 12px;")
+        layout.addWidget(self.text)
         self.set_status(status, label)
 
     def set_status(self, status: str, label: str | None = None) -> None:
-        fg, _bg = finch_theme.STATUS_COLORS.get(status, (finch_theme.MUTED, finch_theme.SLATE_SOFT))
-        self.setText(label or STATUS_LABELS.get(status, status))
-        self.setCustomBackgroundColor(QColor(fg), QColor(fg))
+        self.dot.set_status(status)
+        fg, _bg = finch_theme.STATUS_COLORS.get(
+            status, (finch_theme.MUTED, finch_theme.SLATE_SOFT)
+        )
+        self.text.setText(label or STATUS_LABELS.get(status, status))
+        self.text.setStyleSheet(f"color: {fg}; font-size: 12px; font-weight: 500;")
+
+
+class BreathingDot(QWidget):
+    """Two second breathing dot used for the active agent indicator."""
+
+    def __init__(self, color: str = finch_theme.RUNNING, size: int = 8, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._color = QColor(color)
+        self._size = size
+        self._scale = 1.0
+        self.setFixedSize(size * 3, size * 3)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._anim = QPropertyAnimation(self, b"scale", self)
+        self._anim.setDuration(2000)
+        self._anim.setStartValue(1.0)
+        self._anim.setKeyValueAt(0.5, 2.0)
+        self._anim.setEndValue(1.0)
+        self._anim.setLoopCount(-1)
+        self._anim.valueChanged.connect(lambda _value: self.update())
+
+    def get_scale(self) -> float:
+        return self._scale
+
+    def set_scale(self, value: float) -> None:
+        self._scale = value
+        self.update()
+
+    scale = pyqtProperty(float, get_scale, set_scale)
+
+    def set_color(self, color: str) -> None:
+        self._color = QColor(color)
+        self.update()
+
+    def set_active(self, active: bool) -> None:
+        """Only breathe while something is actually running."""
+        if active:
+            if self._anim.state() != QPropertyAnimation.State.Running:
+                self._anim.start()
+        else:
+            self._anim.stop()
+            self._scale = 1.0
+            self.update()
+
+    def stop_animation(self) -> None:
+        """退出/销毁前停掉循环动画，避免回调打到已销毁的控件。"""
+        self._anim.stop()
+        self._scale = 1.0
+
+    def start(self) -> None:
+        if self._anim.state() != QPropertyAnimation.State.Running:
+            self._anim.start()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        cx, cy = self.width() / 2, self.height() / 2
+        halo = QColor(self._color)
+        halo.setAlphaF(0.26)
+        painter.setBrush(halo)
+        radius = self._size / 2 * self._scale
+        painter.drawEllipse(QPointF(cx, cy), radius, radius)
+        painter.setBrush(self._color)
+        painter.drawEllipse(QPointF(cx, cy), self._size / 2, self._size / 2)
+
+
+class EdgeResizeHandle(QWidget):
+    """4px strip on a docked panel edge: drag to resize, double click to collapse."""
+
+    resized = pyqtSignal(int)
+    finished = pyqtSignal(int)
+    toggled = pyqtSignal()
+
+    def __init__(
+        self,
+        direction: str = "right",
+        minimum: int = 180,
+        maximum: int = 420,
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self._direction = direction
+        self._minimum = minimum
+        self._maximum = maximum
+        self._start_x = 0
+        self._start_w = 0
+        self._last_width = 0
+        self._hover = False
+        self.setFixedWidth(4)
+        self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self.setToolTip("拖动调整宽度 · 双击折叠")
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+    def set_range(self, minimum: int, maximum: int) -> None:
+        self._minimum, self._maximum = minimum, maximum
+
+    def _panel_width(self) -> int:
+        panel = self.parentWidget()
+        return panel.width() if panel else 0
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._start_x = int(event.globalPosition().x())
+            self._start_w = self._panel_width()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        delta = int(event.globalPosition().x()) - self._start_x
+        if self._direction == "left":
+            delta = -delta
+        width = max(self._minimum, min(self._maximum, self._start_w + delta))
+        self._last_width = width
+        self.resized.emit(width)
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.finished.emit(self._last_width or self._panel_width())
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.toggled.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def enterEvent(self, event) -> None:
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:
+        if not self._hover:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor(finch_theme.ACCENT)
+        color.setAlphaF(0.55)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(self.rect().adjusted(1, 6, -1, -6), 1, 1)
+
+
+class StatTile(QFrame):
+    """Big monospace number with a small caption — dashboard cell."""
+
+    def __init__(self, label: str = "", value: str = "0", parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("InsetCard")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(2)
+        self.value = QLabel(value)
+        self.value.setObjectName("StatValue")
+        layout.addWidget(self.value)
+        self.caption = QLabel(label)
+        self.caption.setObjectName("StatLabel")
+        layout.addWidget(self.caption)
+
+    def set_value(self, text: str) -> None:
+        self.value.setText(text)
+
+    def set_color(self, color: str) -> None:
+        self.value.setStyleSheet(f"color: {color};")
 
 
 class ToggleSwitch(SwitchButton):
@@ -481,3 +681,77 @@ class Chip(QLabel):
             f"background: {bg}; color: {fg}; border-radius: 6px; padding: 3px 8px;"
             "font-size: 12px; font-weight: 500;"
         )
+
+
+class HeightGrip(QWidget):
+    """编辑器底部的高度拖拽条：上下拖动改高度，双击恢复默认。"""
+
+    resized = pyqtSignal(int)
+    finished = pyqtSignal(int)
+
+    def __init__(self, target, default: int = 110, minimum: int = 72,
+                 maximum: int = 460, parent=None):
+        super().__init__(parent)
+        self._target = target
+        self._default = default
+        self._minimum = minimum
+        self._maximum = maximum
+        self._start_y = 0
+        self._start_h = 0
+        self._hover = False
+        self.setFixedHeight(8)
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setToolTip("拖动调整高度 · 双击恢复默认")
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._start_y = int(event.globalPosition().y())
+            self._start_h = self._target.height()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        delta = int(event.globalPosition().y()) - self._start_y
+        height = max(self._minimum, min(self._maximum, self._start_h + delta))
+        self._target.setFixedHeight(height)
+        self.resized.emit(height)
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.finished.emit(self._target.height())
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._target.setFixedHeight(self._default)
+            self.finished.emit(self._default)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def enterEvent(self, event) -> None:
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:
+        if not self._hover:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor(finch_theme.SUBTLE)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        width = 28
+        x = (self.width() - width) // 2
+        painter.drawRoundedRect(x, self.height() // 2 - 1, width, 2, 1, 1)

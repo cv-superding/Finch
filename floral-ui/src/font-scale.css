@@ -1,0 +1,40 @@
+/* 界面字号：由 FinchPanel 根元素注入 --fs-N，配置变化即时生效。
+ * §3.2.1 / §4.1：字号收敛为 4 档，相邻档差 >=25%（10 / 12.5 / 16 / 20）；
+ * 保留 fs-10..16 类名作为语义别名，相邻别名合并到同一档，层级交给字重与颜色。
+ * 不用 text-[var(...)]：Tailwind 会把 var() 推断成 color 而不是 font-size。
+ * fallback 为默认 120% 档，变量未注入时也不会退回过小字号。 */
+.fs-10 { font-size: var(--fs-10, 12px); }
+.fs-11 { font-size: var(--fs-11, 12px); }
+.fs-12 { font-size: var(--fs-12, 15px); }
+.fs-13 { font-size: var(--fs-13, 15px); }
+.fs-14 { font-size: var(--fs-14, 19.2px); }
+.fs-15 { font-size: var(--fs-15, 19.2px); }
+.fs-16 { font-size: var(--fs-16, 24px); }
+
+/* 这段必须放在所有入口都会加载的文件里：Tauri 主窗口走 index.html，
+ * 不加载 webui3.css，所以横向滚动条与渐隐提示不能只写在云母样式表里。 */
+.chips-scroll {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent 100%);
+  scrollbar-width: none;
+}
+.chips-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* 任务卡整块是拖动排序区：禁止文本拖选与原生图片/元素拖拽，
+ * 否则按住卡片拖动会先变成蓝色文本选区，交互看起来像坏了。 */
+.task-row,
+.task-row * {
+  -webkit-user-select: none !important;
+  user-select: none !important;
+  -webkit-user-drag: none !important;
+}
+
+/* 滚动条出现/消失时不改变内容宽度；横向滚动条彻底不占位 */
+.gutter-stable {
+  scrollbar-gutter: stable;
+}
+.gutter-stable::-webkit-scrollbar {
+  height: 0;
+}

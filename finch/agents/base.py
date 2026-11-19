@@ -137,6 +137,8 @@ class AgentAdapter(ABC):
                 self._version_argv(path),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=12,
                 creationflags=_no_window(),
             )

@@ -4,11 +4,31 @@ from typing import Callable, Sequence
 from weakref import WeakKeyDictionary
 
 from PyQt6.QtCore import QEvent, QObject, QPoint, Qt
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QFontMetrics, QIcon
 from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CardWidget, TransparentToolButton
+from qfluentwidgets import CardWidget, TransparentToolButton
+
+from . import theme
+from .widgets import ElidedLabel
 
 _OPEN_POPOVERS: list["ActionPopover"] = []
+
+
+def _forget(popover: "ActionPopover") -> None:
+    """按身份移除，避免对已销毁的 C++ 对象做比较。"""
+    for item in list(_OPEN_POPOVERS):
+        if item is popover:
+            _OPEN_POPOVERS.remove(item)
+
+
+def close_all() -> None:
+    """退出前统一收起，避免残留的顶层卡片在销毁阶段回调。"""
+    for popover in list(_OPEN_POPOVERS):
+        try:
+            popover.hide()
+        except RuntimeError:
+            _forget(popover)
+    _OPEN_POPOVERS.clear()
 _POPOVERS: "WeakKeyDictionary[QWidget, ActionPopover]" = WeakKeyDictionary()
 
 
@@ -25,7 +45,11 @@ class ActionPopover(CardWidget):
         self._anchor = anchor
         self.setObjectName("ActionPopover")
         self.setBorderRadius(8)
-        self.setFixedWidth(176)
+        self.setFixedWidth(200)
+        self.setStyleSheet(
+            f"QWidget#ActionPopover {{ background: {theme.CARD};"
+            f" border: 1px solid {theme.BORDER_STRONG}; border-radius: 8px; }}"
+        )
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(6, 6, 6, 6)
         self._layout.setSpacing(2)
@@ -39,6 +63,14 @@ class ActionPopover(CardWidget):
             widget = item.widget()
             if widget:
                 widget.deleteLater()
+        # 宽度按最长文案算，避免 176px 固定宽把「清理（独立目录）与队列顺序」截断
+        metrics = QFontMetrics(self.font())
+        widest = max(
+            (metrics.horizontalAdvance(text) for text, _icon, _cb in items),
+            default=0,
+        )
+        self.setFixedWidth(max(200, min(320, widest + 86)))
+
         for text, icon, callback in items:
             button = TransparentToolButton()
             button.setIcon(icon)
@@ -50,12 +82,21 @@ class ActionPopover(CardWidget):
             row.setContentsMargins(8, 0, 8, 0)
             row.setSpacing(8)
             row.addWidget(button, 0)
-            label = BodyLabel(text, self)
-            label.setStyleSheet("background: transparent; font-size: 13px;")
+            label = ElidedLabel(text, parent=self)
+            label.setStyleSheet(
+                f"background: transparent; font-size: 13px; color: {theme.TEXT};"
+            )
+            label.setToolTip(text)
             row.addWidget(label, 1)
             holder = QWidget(self)
+            holder.setObjectName("PopoverRow")
+            holder.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
             holder.setLayout(row)
             holder.setCursor(Qt.CursorShape.PointingHandCursor)
+            holder.setStyleSheet(
+                "QWidget#PopoverRow { background: transparent; border-radius: 6px; }"
+                "QWidget#PopoverRow:hover { background: rgba(255, 255, 255, 0.07); }"
+            )
             holder.mouseReleaseEvent = lambda _event, cb=callback: self._run(cb)()
             button.clicked.connect(self._run(callback))
             self._layout.addWidget(holder)
@@ -69,8 +110,7 @@ class ActionPopover(CardWidget):
 
     def hide(self) -> None:
         super().hide()
-        if self in _OPEN_POPOVERS:
-            _OPEN_POPOVERS.remove(self)
+        _forget(self)
 
     def popup(self) -> None:
         self.adjustSize()
@@ -78,14 +118,19 @@ class ActionPopover(CardWidget):
         window = anchor.window()
         if window is None:
             return
-        global_pos = anchor.mapToGlobal(QPoint(0, anchor.height() + 4))
-        screen = window.screen()
-        geometry = screen.availableGeometry() if screen else None
-        if geometry is not None and global_pos.y() + self.height() > geometry.bottom():
-            global_pos = anchor.mapToGlobal(QPoint(0, -self.height() - 4))
-        position = window.mapFromGlobal(global_pos)
-        position.setX(max(4, min(position.x(), window.width() - self.width() - 4)))
-        position.setY(max(4, min(position.y(), window.height() - self.height() - 4)))
+        margin = 8
+        below = anchor.mapToGlobal(QPoint(0, anchor.height() + 4))
+        above = anchor.mapToGlobal(QPoint(0, -self.height() - 4))
+        position = window.mapFromGlobal(below)
+        # 下方放不下就翻到上方；左右都夹在窗口内，避免贴边被裁
+        if position.y() + self.height() > window.height() - margin:
+            position.setY(window.mapFromGlobal(above).y())
+        position.setX(
+            max(margin, min(position.x(), window.width() - self.width() - margin))
+        )
+        position.setY(
+            max(margin, min(position.y(), window.height() - self.height() - margin))
+        )
         self.move(position)
         self.show()
         self.raise_()
@@ -102,6 +147,7 @@ def open_popover(
         popover = ActionPopover(anchor, items)
         _POPOVERS[anchor] = popover
         anchor.destroyed.connect(popover.deleteLater)
+        popover.destroyed.connect(lambda _=None, p=popover: _forget(p))
     else:
         popover.set_items(items)
     popover.popup()
@@ -121,7 +167,7 @@ class PopoverWatcher(QObject):
                 try:
                     inside = popover.geometry().contains(window.mapFromGlobal(position))
                 except RuntimeError:
-                    _OPEN_POPOVERS.remove(popover)
+                    _forget(popover)
                     continue
                 if not inside:
                     popover.hide()

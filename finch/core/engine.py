@@ -209,6 +209,17 @@ class QueueEngine:
         self._terminate_active()
         for event in list(self._decision_events.values()):
             event.set()
+        worker = getattr(self, "_thread", None)
+        # 空闲队列没有 _loop 在跑，finally 不会执行；此处必须自己回到 idle，
+        # 否则「终止」后状态永远停在 stopping，开始按钮会被挡住。
+        if worker is None or not worker.is_alive():
+            self._active_task_id = ""
+            self._active_proc = None
+            self._paused = False
+            self._stop.clear()
+            self._set_state("idle")
+            self.signals.toast.emit("队列已停止", "info")
+            return
         self._set_state("stopping")
         self.signals.toast.emit("正在终止当前任务", "warning")
 
@@ -244,7 +255,9 @@ class QueueEngine:
             return
         # Restored "awaiting" task after an app restart: no live waiter exists.
         task = self.store.get_task(task_id)
-        if not task or task.status != TaskStatus.awaiting.value:
+        # attention 与 awaiting 都代表「等待人工决定」：前端决策卡按这两种
+        # 状态展示，只认 awaiting 会让卡片上的按钮点了没有任何效果。
+        if not task or task.status not in (TaskStatus.awaiting.value, TaskStatus.attention.value):
             return
         if decision == "approve":
             prompt = (prompt or task.followup_prompt).strip()
@@ -487,9 +500,12 @@ class QueueEngine:
         finally:
             self._active_task_id = ""
             self._active_proc = None
-            if not self._stop.is_set() and not self._paused:
-                self._set_state("idle")
             self._thread = None
+            # 无论因为空闲、暂停还是终止退出，都要回到 idle，
+            # 否则「终止」之后状态会永远停在 stopping，界面无法再次开始。
+            self._paused = False
+            self._stop.clear()
+            self._set_state("idle")
 
     def _pick_task(self) -> Task | None:
         for task in self.store.list_tasks():

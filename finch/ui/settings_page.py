@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
+import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QButtonGroup,
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -25,7 +26,6 @@ from ..core.optimizer import PromptOptimizer
 from ..store import Store
 from qfluentwidgets import (
     IconWidget,
-    PivotItem,
     SmoothScrollArea,
     LineEdit,
     PlainTextEdit,
@@ -39,11 +39,11 @@ from . import theme
 from .agent_icons import agent_qicon
 from .glyphs import line_icon
 from .widgets import (
+    HeightGrip,
     BackgroundTask,
     ElidedLabel,
     Select,
     ToggleSwitch,
-    apply_shadow,
     divider,
     pick_folder,
 )
@@ -63,8 +63,8 @@ class SettingsPage(QWidget):
         self.sections: dict[str, QFrame] = {}
         self.side_buttons: dict[str, QPushButton] = {}
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 12)
-        root.setSpacing(14)
+        root.setContentsMargins(44, 28, 44, 16)
+        root.setSpacing(0)
         header = QVBoxLayout()
         header.setSpacing(6)
         title = QLabel("设置")
@@ -74,18 +74,16 @@ class SettingsPage(QWidget):
         subtitle.setObjectName("PageSubtitle")
         header.addWidget(subtitle)
         root.addLayout(header)
+        root.addSpacing(22)
 
         body = QHBoxLayout()
         body.setSpacing(16)
-        nav = QFrame()
-        nav.setObjectName("SideNavPanel")
-        nav.setFixedWidth(184)
-        apply_shadow(nav, blur=12, y=2, alpha=10)
-        nav_layout = QVBoxLayout(nav)
-        nav_layout.setContentsMargins(10, 12, 10, 12)
-        nav_layout.setSpacing(1)
-        group = QButtonGroup(self)
-        group.setExclusive(True)
+
+        # 分区导航改成顶部下划线标签，内容区拿到全部宽度
+        tab_bar = QWidget()
+        tab_layout = QHBoxLayout(tab_bar)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.setSpacing(28)
         self._section_order = [
             ("agents", "Agent 接入", "bot"),
             ("runtime", "运行环境", "folder"),
@@ -95,22 +93,27 @@ class SettingsPage(QWidget):
             ("optimizer", "提示词优化", "spark"),
             ("data", "数据与日志", "archive"),
         ]
-        for key, label, glyph in self._section_order:
-            item = PivotItem()
-            item.setText(label)
-            item.setIcon(line_icon(glyph, theme.SUBTLE, 16))
-            item.setFixedHeight(36)
-            item.clicked.connect(lambda _=False, k=key: self._scroll_to(k))
-            nav_layout.addWidget(item)
-            self.side_buttons[key] = item
-        self.side_buttons["agents"].setSelected(True)
-        self._sync_sidebar_icons()
-        nav_layout.addStretch(1)
+        for key, label, _glyph in self._section_order:
+            button = QPushButton(label)
+            button.setObjectName("UnderlineTab")
+            button.setProperty("active", key == "agents")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(lambda _=False, k=key: self._scroll_to(k))
+            tab_layout.addWidget(button)
+            self.side_buttons[key] = button
+        tab_layout.addStretch(1)
+        self.theme_btn = QPushButton()
+        self.theme_btn.setObjectName("GhostButton")
+        self.theme_btn.setFixedHeight(30)
+        self.theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sync_theme_button()
+        self.theme_btn.clicked.connect(self._toggle_theme_mode)
+        tab_layout.addWidget(self.theme_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         tip = QLabel("本机存储 · 不上传")
-        tip.setWordWrap(True)
-        tip.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 12px; padding-left: 4px;")
-        nav_layout.addWidget(tip)
-        body.addWidget(nav, 0)
+        tip.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 12px;")
+        tab_layout.addWidget(tip, 0, Qt.AlignmentFlag.AlignVCenter)
+        root.addWidget(tab_bar)
+        root.addSpacing(28)
 
         self.scroll = SmoothScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -138,12 +141,19 @@ class SettingsPage(QWidget):
         footer = QHBoxLayout(footer_wrap)
         footer.setContentsMargins(2, 8, 0, 0)
         self.save_status = QLabel("修改后点击保存")
-        self.save_status.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 12px;")
+        self.save_status.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 12.5px;")
         footer.addWidget(self.save_status)
         footer.addStretch(1)
         self.save_btn = PrimaryPushButton("保存设置")
-        self.save_btn.setFixedHeight(32)
+        self.save_btn.setFixedHeight(40)
         self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # 库自带的 PrimaryPushButton 用的是 qfluent 主题色，这里统一到品牌色
+        self.save_btn.setStyleSheet(
+            "QPushButton { background: #6E6BF0; color: #FFFFFF; border: none;"
+            " border-radius: 10px; padding: 0 24px; font-size: 13.5px; font-weight: 500; }"
+            "QPushButton:hover { background: #7C79F5; }"
+            "QPushButton:pressed { background: #5A57E0; }"
+        )
         self.save_btn.clicked.connect(self.save)
         footer.addWidget(self.save_btn)
         right_col.addWidget(footer_wrap)
@@ -167,8 +177,16 @@ class SettingsPage(QWidget):
         if not frame:
             return
         self.scroll.ensureWidgetVisible(frame, 0, 14)
-        self.side_buttons[key].setSelected(True)
-        self._sync_sidebar_icons()
+        self._set_active_tab(key)
+
+    def _set_active_tab(self, key: str) -> None:
+        for name, button in self.side_buttons.items():
+            active = name == key
+            if bool(button.property("active")) == active:
+                continue
+            button.setProperty("active", active)
+            button.style().unpolish(button)
+            button.style().polish(button)
 
     def _sync_nav(self, value: int) -> None:
         current = self._section_order[0][0]
@@ -179,22 +197,39 @@ class SettingsPage(QWidget):
         bar = self.scroll.verticalScrollBar()
         if bar.maximum() > 0 and value >= bar.maximum() - 8:
             current = self._section_order[-1][0]
-        self.side_buttons[current].setSelected(True)
-        self._sync_sidebar_icons()
+        self._set_active_tab(current)
 
-    def _sync_sidebar_icons(self) -> None:
-        for key, _label, glyph in self._section_order:
-            item = self.side_buttons.get(key)
-            if not item:
-                continue
-            color = theme.ACCENT if item.isSelected else theme.SUBTLE
-            item.setIcon(line_icon(glyph, color, 16))
+    def _sync_theme_button(self) -> None:
+        light = (getattr(self.config, "theme_mode", "dark") or "dark") == "light"
+        self.theme_btn.setText("浅色主题" if light else "深色主题")
+        self.theme_btn.setToolTip(
+            "当前为浅色，点击切回深色（会重启应用）"
+            if light
+            else "当前为深色，点击切换到浅色（会重启应用）"
+        )
+
+    def _toggle_theme_mode(self) -> None:
+        mode = "dark" if (getattr(self.config, "theme_mode", "dark") == "light") else "light"
+        window = self.window()
+        if hasattr(window, "reload_for_theme"):
+            window.reload_for_theme(mode)
+            return
+        self.config.theme_mode = mode
+        self.store.save_config(self.config)
+        self._sync_theme_button()
+
+    def _prompt_height(self, key: str, default: int) -> int:
+        try:
+            value = int(self.store.get_setting(key, str(default)) or default)
+        except ValueError:
+            value = default
+        return max(72, min(460, value))
 
     def _card(self, key: str, title: str, subtitle: str = "") -> tuple[QWidget, QVBoxLayout]:
         self._section_counter += 1
         frame = QWidget()
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         head = QVBoxLayout()
         head.setSpacing(6)
@@ -202,7 +237,7 @@ class SettingsPage(QWidget):
         head_row.setSpacing(10)
         number = QLabel(f"{self._section_counter:02d}")
         number.setStyleSheet(
-            f"color: {theme.ACCENT_DARK}; font-size: 12px; font-weight: 600;"
+            f"color: {theme.ACCENT}; font-size: 12px; font-weight: 600;"
             f" font-family: '{theme.mono_family()}';"
         )
         head_row.addWidget(number)
@@ -217,34 +252,35 @@ class SettingsPage(QWidget):
             hint.setStyleSheet(f"color: {theme.MUTED}; font-size: 13px;")
             head.addWidget(hint)
         layout.addLayout(head)
-        layout.addSpacing(12)
+        layout.addSpacing(20)
+        if self._section_counter > 1:
+            self.sections_layout.addSpacing(48)
         self.sections_layout.addWidget(frame)
-        self.sections_layout.addWidget(divider())
         self.sections[key] = frame
         return frame, layout
 
     def _row(self, title: str, description: str, control: QWidget, layout: QVBoxLayout, last: bool = False) -> None:
         row = QWidget()
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 8, 0, 8)
-        row_layout.setSpacing(16)
+        row_layout.setContentsMargins(0, 11, 0, 11)
+        row_layout.setSpacing(24)
         text = QVBoxLayout()
         text.setSpacing(4)
         label = QLabel(title)
-        label.setStyleSheet(f"font-size: 13px; font-weight: 500; color: {theme.TEXT};")
+        label.setStyleSheet(f"font-size: 14px; font-weight: 500; color: {theme.TEXT};")
         text.addWidget(label)
         if description:
             desc = QLabel(description)
             desc.setWordWrap(True)
-            desc.setStyleSheet(f"color: {theme.MUTED}; font-size: 12px;")
+            desc.setStyleSheet(f"color: {theme.MUTED}; font-size: 13px;")
             text.addWidget(desc)
         row_layout.addLayout(text, 1)
         if not isinstance(control, (QPlainTextEdit, ToggleSwitch)):
-            control.setFixedHeight(32)
+            control.setFixedHeight(36)
         row_layout.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(row)
         if not last:
-            layout.addWidget(divider())
+            layout.addSpacing(22)
 
     def _line(self, text: str = "", placeholder: str = "", password: bool = False) -> QLineEdit:
         edit = LineEdit()
@@ -287,22 +323,23 @@ class SettingsPage(QWidget):
         self.agent_path_edits: dict[str, QLineEdit] = {}
         self.agent_status: dict[str, QLabel] = {}
         for index, cls in enumerate(ADAPTER_CLASSES):
-            row = QWidget()
-            row.setFixedHeight(44)
+            row = QFrame()
+            row.setObjectName("AgentCard")
+            row.setMinimumHeight(68)
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(12)
+            row_layout.setContentsMargins(20, 12, 20, 12)
+            row_layout.setSpacing(16)
             icon = IconWidget()
             icon.setIcon(agent_qicon(cls.key))
-            icon.setFixedSize(18, 18)
+            icon.setFixedSize(34, 34)
             row_layout.addWidget(icon)
             text = QVBoxLayout()
             text.setSpacing(4)
             name = QLabel(cls.label)
-            name.setStyleSheet(f"font-size: 13px; font-weight: 500; color: {theme.TEXT};")
+            name.setStyleSheet(f"font-size: 15px; font-weight: 600; color: {theme.TEXT};")
             text.addWidget(name)
             desc = ElidedLabel(cls.description)
-            desc.setStyleSheet(f"color: {theme.MUTED}; font-size: 12px;")
+            desc.setStyleSheet(f"color: {theme.MUTED}; font-size: 13px;")
             desc.setToolTip(cls.description)
             text.addWidget(desc)
             row_layout.addLayout(text, 3)
@@ -310,26 +347,27 @@ class SettingsPage(QWidget):
             edit.setText(self.config.agent_paths.get(cls.key, ""))
             edit.setPlaceholderText("自动查找 PATH" if cls.key != "mock" else "内置示例 Agent")
             edit.setEnabled(cls.key != "mock")
-            edit.setMinimumWidth(170)
-            edit.setMaximumWidth(205)
-            edit.setFixedHeight(32)
+            edit.setMinimumWidth(240)
+            edit.setMaximumWidth(300)
+            edit.setFixedHeight(36)
             self.agent_path_edits[cls.key] = edit
             row_layout.addWidget(edit, 2)
             status = QLabel("")
-            status.setFixedSize(58, 22)
+            status.setFixedSize(64, 24)
             status.setAlignment(Qt.AlignmentFlag.AlignCenter)
             status.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 12px; font-weight: 500; background: {theme.SLATE_SOFT}; border-radius: 6px;")
             self.agent_status[cls.key] = status
             row_layout.addWidget(status)
             detect = PushButton("检测")
-            detect.setFixedHeight(28)
+            detect.setObjectName("GhostButton")
+            detect.setFixedHeight(36)
             detect.clicked.connect(lambda _=False, k=cls.key, e=edit, s=status: self._detect_agent(k, e, s))
             row_layout.addWidget(detect)
             layout.addWidget(row)
             if index < len(ADAPTER_CLASSES) - 1:
-                layout.addWidget(divider())
+                layout.addSpacing(16)
             self._set_agent_hint(cls.key, status)
-        layout.addSpacing(10)
+        layout.addSpacing(20)
         hint = QLabel("新增 Agent：实现 AgentAdapter（命令构建 + 事件解析 + 会话恢复）后注册即可，无需改动调度核心。")
         hint.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 12px;")
         hint.setWordWrap(True)
@@ -474,21 +512,41 @@ class SettingsPage(QWidget):
             layout,
         )
         continue_label = QLabel("续传指令模板")
-        continue_label.setObjectName("SectionLabel")
+        continue_label.setObjectName("FieldLabel")
         layout.addWidget(continue_label)
         self.continue_prompt = PlainTextEdit()
         self.continue_prompt.setPlainText(self.config.continue_prompt)
-        self.continue_prompt.setFixedHeight(76)
+        self.continue_prompt.setFixedHeight(
+            self._prompt_height("prompt_height_continue", 120)
+        )
         self.continue_prompt.setObjectName("PromptEdit")
+        self.continue_prompt.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
         layout.addWidget(self.continue_prompt)
+        continue_grip = HeightGrip(self.continue_prompt, default=120)
+        continue_grip.finished.connect(
+            lambda height: self.store.set_setting("prompt_height_continue", str(height))
+        )
+        layout.addWidget(continue_grip)
         followup_label = QLabel("补做指令模板")
-        followup_label.setObjectName("SectionLabel")
+        followup_label.setObjectName("FieldLabel")
         layout.addWidget(followup_label)
         self.followup_template = PlainTextEdit()
         self.followup_template.setPlainText(self.config.followup_template)
-        self.followup_template.setFixedHeight(132)
+        self.followup_template.setFixedHeight(
+            self._prompt_height("prompt_height_followup", 168)
+        )
         self.followup_template.setObjectName("PromptEdit")
+        self.followup_template.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
         layout.addWidget(self.followup_template)
+        followup_grip = HeightGrip(self.followup_template, default=168)
+        followup_grip.finished.connect(
+            lambda height: self.store.set_setting("prompt_height_followup", str(height))
+        )
+        layout.addWidget(followup_grip)
         hint = QLabel("可用占位符：{task} 原任务、{summary} 摘要、{items} 缺漏与问题、{title} 标题。")
         hint.setStyleSheet(f"color: {theme.SUBTLE}; font-size: 12px;")
         layout.addWidget(hint)
@@ -535,8 +593,11 @@ class SettingsPage(QWidget):
         self._line_row("模型", "建议使用支持 JSON 输出的指令模型。", self.analyzer_model, layout)
         self.analyzer_hints = PlainTextEdit()
         self.analyzer_hints.setPlainText(self.config.analyzer_hints)
-        self.analyzer_hints.setFixedHeight(64)
+        self.analyzer_hints.setFixedHeight(56)
         self.analyzer_hints.setObjectName("PromptEdit")
+        self.analyzer_hints.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
         self.analyzer_hints.setPlaceholderText("识别偏好，例如：把未运行的测试视为遗留问题")
         self._row("识别偏好", "会附加到解析提示词中；人工修正也会作为示例自动参考。", self.analyzer_hints, layout)
         test_row = QWidget()

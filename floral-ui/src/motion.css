@@ -1,0 +1,104 @@
+/* Finch 动效层：由 FinchPanel 直接 import，Tauri / 默认页 / 云母版三套入口都会加载。
+ * 只用 transform / opacity；时长与曲线取自 animate skill 的既有刻度，不另造一套。 */
+:root {
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* 高频按压：140ms，近无感，目的只是确认「界面听见了」 */
+button {
+  transition:
+    transform 140ms var(--ease-out),
+    background-color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    color 140ms var(--ease-out);
+}
+button:active {
+  transform: scale(0.97);
+}
+
+/* 任务卡 hover：只在真鼠标设备上生效，触屏 tap 不触发假 hover */
+@media (hover: hover) and (pointer: fine) {
+  .task-row:not([data-dragging]) {
+    transition:
+      transform 160ms var(--ease-out),
+      border-color 160ms var(--ease-out),
+      background-color 160ms var(--ease-out),
+      box-shadow 160ms var(--ease-out);
+  }
+  .task-row:not([data-dragging]):hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-e2);
+  }
+}
+
+/* 拖拽跟手/让位由 JS 直接写 transform；落下后的 FLIP 也走这条曲线 */
+.task-row[data-dragging] {
+  cursor: grabbing;
+}
+
+/* 偶发层：菜单从触发器展开，对话框居中，抽屉从右侧滑入 */
+@keyframes finch-pop-in {
+  from { opacity: 0; transform: scale(0.95) translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes finch-modal-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes finch-drawer-in {
+  from { transform: translateX(100%); }
+  to   { transform: none; }
+}
+@keyframes finch-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes finch-page-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.pop-in {
+  transform-origin: top right;
+  animation: finch-pop-in 180ms var(--ease-out) both;
+}
+.modal-in {
+  transform-origin: center;
+  animation: finch-modal-in 220ms var(--ease-out) both;
+}
+.drawer-in {
+  animation: finch-drawer-in 260ms var(--ease-drawer) both;
+}
+.backdrop-in {
+  animation: finch-fade-in 220ms var(--ease-out) both;
+}
+.page-in {
+  animation: finch-page-in 160ms var(--ease-out) both;
+}
+
+/* toast 用 transition 而非 keyframes：连点时会从当前值重定目标，不会重头播放 */
+.toast {
+  opacity: 0;
+  transform: translate(-50%, 12px);
+  transition:
+    opacity 240ms ease,
+    transform 240ms ease;
+}
+.toast[data-visible="true"] {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+/* 减少动效：保留能帮助理解的淡入，去掉所有位移与缩放 */
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse { animation: none; }
+  button:active { transform: none; }
+  .task-row:not([data-dragging]):hover { transform: none; }
+  .pop-in, .modal-in, .drawer-in, .page-in, .backdrop-in {
+    animation: finch-fade-in 200ms ease both;
+  }
+  .toast { transform: translateX(-50%); }
+  .toast[data-visible="true"] { transform: translateX(-50%); }
+}

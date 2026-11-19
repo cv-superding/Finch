@@ -4,6 +4,7 @@ from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, Qt, pyqtPrope
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QSizePolicy,
@@ -22,7 +23,7 @@ from qfluentwidgets import (
 
 from ..models import STATUS_LABELS, Task, TaskStatus
 from . import theme
-from .widgets import ElidedLabel, ToggleSwitch, divider
+from .widgets import ElidedLabel, StatTile, ToggleSwitch, divider
 
 RUNNING = {
     TaskStatus.running.value,
@@ -106,7 +107,10 @@ class OverviewPanel(QFrame):
         hero_text = QVBoxLayout()
         hero_text.setSpacing(2)
         self.big_number = StrongBodyLabel("0 / 0", self)
-        self.big_number.setStyleSheet(f"font-size: 22px; font-weight: 700; color: {theme.TEXT};")
+        self.big_number.setStyleSheet(
+            f"font-size: 28px; font-weight: 600; color: {theme.TEXT};"
+            f" font-family: {theme.mono_family()};"
+        )
         hero_text.addWidget(self.big_number)
         done_label = CaptionLabel("任务完成", self)
         hero_text.addWidget(done_label)
@@ -150,34 +154,24 @@ class OverviewPanel(QFrame):
         self.current_card.clicked.connect(self._current_clicked)
         content.addWidget(self.current_card)
 
-        metrics = QHBoxLayout()
-        metrics.setSpacing(0)
-        self.metric_values: dict[str, QLabel] = {}
+        metrics = QGridLayout()
+        metrics.setContentsMargins(0, 0, 0, 0)
+        metrics.setHorizontalSpacing(8)
+        metrics.setVerticalSpacing(8)
+        self.metric_values: dict[str, StatTile] = {}
         for index, (key, label_text) in enumerate(
             (
+                ("done", "完成"),
+                ("queued", "待执行"),
+                ("attention", "待人工"),
                 ("resume", "续传"),
                 ("followup", "补做"),
                 ("tools", "工具"),
-                ("attention", "待人工"),
             )
         ):
-            if index:
-                line = QFrame()
-                line.setFixedWidth(1)
-                line.setStyleSheet(f"background: {theme.BORDER_SOFT};")
-                metrics.addWidget(line)
-            cell = QWidget()
-            cell_layout = QVBoxLayout(cell)
-            cell_layout.setContentsMargins(8, 0, 4, 0)
-            cell_layout.setSpacing(1)
-            value = StrongBodyLabel("0", cell)
-            value.setStyleSheet(f"font-size: 17px; font-weight: 600; color: {theme.TEXT};")
-            cell_layout.addWidget(value)
-            caption = CaptionLabel(label_text, cell)
-            caption.setStyleSheet(f"color: {theme.MUTED}; font-size: 11px;")
-            cell_layout.addWidget(caption)
-            metrics.addWidget(cell, 1)
-            self.metric_values[key] = value
+            tile = StatTile(label_text, "0")
+            metrics.addWidget(tile, index // 3, index % 3)
+            self.metric_values[key] = tile
         content.addLayout(metrics)
 
         strategy_label = CaptionLabel("运行策略", self)
@@ -323,6 +317,9 @@ class OverviewPanel(QFrame):
         self.activity_dot.setStyleSheet(f"background: {activity_color}; border-radius: 3px;")
 
         active = next((task for task in tasks if task.id == active_task_id), None)
+        if active is None:
+            # 引擎未接管但仍有任务处于进行中（如重启后残留），面板也要显示它
+            active = next((task for task in tasks if task.status in RUNNING), None)
         self._active_task = active
         if active:
             fg, _bg = theme.STATUS_COLORS.get(active.status, (theme.MUTED, theme.SLATE_SOFT))
@@ -363,12 +360,19 @@ class OverviewPanel(QFrame):
         resume = sum(task.resume_count for task in tasks)
         followup = sum(task.followup_count for task in tasks)
         tools = sum(task.tool_count for task in tasks)
-        self.metric_values["resume"].setText(str(resume))
-        self.metric_values["followup"].setText(str(followup))
-        self.metric_values["tools"].setText(str(tools))
-        self.metric_values["attention"].setText(str(attention))
-        self.metric_values["attention"].setStyleSheet(
-            f"font-size: 17px; font-weight: 600; color: {theme.RED_TINT if attention else theme.SUBTLE};"
+        self.metric_values["resume"].set_value(str(resume))
+        self.metric_values["resume"].set_color(theme.ORANGE)
+        self.metric_values["followup"].set_value(str(followup))
+        self.metric_values["followup"].set_color(theme.ORANGE)
+        self.metric_values["tools"].set_value(str(tools))
+        self.metric_values["tools"].set_color(theme.BLUE)
+        self.metric_values["done"].set_value(str(done))
+        self.metric_values["done"].set_color(theme.GREEN)
+        self.metric_values["queued"].set_value(str(queued))
+        self.metric_values["queued"].set_color(theme.MUTED)
+        self.metric_values["attention"].set_value(str(attention))
+        self.metric_values["attention"].set_color(
+            theme.RED if attention else theme.SUBTLE
         )
 
         self.strategy_rows["text"].setText(f"{self.config.text_idle_timeout}s")

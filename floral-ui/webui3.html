@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light" data-mica="on">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Finch · WebUI 3 云母</title>
+    <script>
+      (function () {
+        var params = new URLSearchParams(location.search);
+        if (params.get("mica") === "0") {
+          document.documentElement.removeAttribute("data-mica");
+        }
+        var forced = params.get("theme");
+        var opt = localStorage.getItem("theme-option");
+        var theme = forced === "light" || forced === "dark"
+          ? forced
+          : opt === "light" || opt === "dark"
+            ? opt
+            : window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <style>
+      html, body, #root { height: 100%; margin: 0; }
+      #results { position: fixed; left: -99999px; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <pre id="results">PENDING</pre>
+    <script type="module" src="/src/finch-test.tsx"></script>
+  </body>
+</html>
